@@ -1,4 +1,5 @@
-/src-tauri/target/
+# workspace 的建置產物在根目錄，不是 src-tauri 底下
+/target/
 /src-tauri/gen/schemas/
 
 # 下載中的暫存檔

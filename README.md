@@ -2,115 +2,143 @@
 
 貼連結、排隊、下載。影片、音樂、串流都吃，每個檔案都驗證過能播才留下。
 
-macOS（Intel / Apple Silicon）與 Windows 皆可執行。
+有圖形介面，也有給腳本與 AI agent 用的命令列。macOS（Intel / Apple Silicon）與 Windows 皆可執行。
 
 ## 安裝
 
 到 [Releases](../../releases) 下載：
 
-| 平台 | 檔案 |
-| --- | --- |
-| macOS | `Haul_x.y.z_universal.dmg` — 一份通用，Intel 與 Apple Silicon 都是原生執行 |
-| Windows | `Haul_x.y.z_x64-setup.exe` |
+| 平台 | GUI | CLI |
+| --- | --- | --- |
+| macOS | `Haul_x.y.z_universal.dmg`（Intel 與 Apple Silicon 通用） | `haul-universal-apple-darwin` |
+| Windows | `Haul_x.y.z_x64-setup.exe` | `haul-x86_64-pc-windows-msvc.exe` |
 
 沒有做程式碼簽章，首次開啟需要放行一次：
 
 - **macOS** — 「系統設定 → 隱私權與安全性」按「仍要打開」
 - **Windows** — SmartScreen 出現時選「更多資訊 → 仍要執行」
 
-**首次啟動會自動下載 yt-dlp 與 ffmpeg**（約 80 MB，存在 app 的資料夾裡），介面上會顯示進度。之後就不需要網路以外的任何準備。
+**首次啟動會自動下載 yt-dlp 與 ffmpeg**（約 80 MB，存在 app 資料夾）。GUI 與 CLI 共用同一份，不會各抓一次。
 
-## 用法
+## GUI
 
-1. 把連結貼進上方欄位，一行一個（也可以直接把連結拖進視窗）
-2. 選「影片」或「只要聲音」
-3. 按「加入佇列」或 <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd>
+貼連結（或直接拖進視窗），選「影片」或「只要聲音」，按加入佇列。檔案存到 `~/Downloads/Haul`。
 
-檔案存到 `~/Downloads/Haul`，按底部「開啟資料夾」直接跳過去。
+完成的項目**點一下就用系統播放器開啟**。歷史會保留，重開 app 仍看得到。
 
-單支連結最直接。播放清單、頻道、個人頁也可以貼，Haul 會展開成一項一項排隊。
+## CLI
 
-**「只要聲音」不會重新編碼**：直接取出原始音軌，能複製就複製。從一支影片抽出音訊通常不到一秒，而且位元完全相同。
+```bash
+haul <網址>...                # 下載影片
+haul -a <網址>...             # 只要聲音（抽原始音軌，不重新編碼）
+haul -o <資料夾> <網址>       # 指定輸出位置
+haul status                   # 列出歷史
+haul update                   # 更新 yt-dlp
+```
+
+**離開碼就是答案**——這是 Haul 相對於直接呼叫 yt-dlp 的全部價值：
+
+| 離開碼 | 意思 |
+| --- | --- |
+| `0` | 每一項都下載完成且通過驗證。檔案存在且真的能播 |
+| `1` | 有項目失敗 |
+| `2` | 用法錯誤，或準備 yt-dlp / ffmpeg 失敗 |
+
+不需要自己檢查檔案存不存在或大小對不對，那些閘門已經跑過了。
+
+`--json` 讓每個狀態變化印成一行 NDJSON 到 stdout（人類看的進度走 stderr，重導向不會混在一起）：
+
+```bash
+haul --json <網址> | jq -r 'select(.status=="done") | .path'
+```
+
+### 給 AI agent 用
+
+`.claude/skills/haul/` 是一份 Claude Code skill，教 agent 何時該用、怎麼讀 NDJSON、失敗了該做什麼（例如站點改版時先 `haul update` 再重試，而不是直接放棄）。
+
+要在所有專案都能用就連結到全域：
+
+```bash
+ln -s "$PWD/.claude/skills/haul" ~/.claude/skills/haul
+```
+
+`haul status` 讀的是輸出資料夾裡的 `.haul-history.jsonl`。**不需要 GUI 在跑，也沒有 daemon 或 port——狀態檔本身就是介面。** 那個檔是 append-only 的，所以 GUI 與 CLI 同時跑也不會互相蓋掉紀錄。
 
 ## 運作方式
 
 萃取交給 [yt-dlp](https://github.com/yt-dlp/yt-dlp)，Haul 負責佇列、限流、驗證與檔案管理。
 
 ```
-連結 ─→ yt-dlp 解析 ─→ 展開清單 ─→ 逐項下載 ─→ 驗證 ─→ 存檔
-                                       │          │
-                                  進度回報    沒過就刪掉
+連結 ─→ 解析 ─→ 展開清單 ─→ 逐項下載 ─→ 驗證 ─→ 存檔
+         │                                  │
+    yt-dlp 為主                        沒過就刪掉
+    拒絕時走直接抓取
 ```
 
 ### 為什麼不自己寫萃取
 
-這支工具原本鎖定單一站點，直接硬編 CDN 的網址規則。第一次拿真實連結測試就 403 ——
+這支工具原本鎖定單一站點，硬編了 CDN 的網址規則。第一次拿真實連結測試就 403 ——
 該站已經改成投遞影音混合的 mp4，舊規則當場失效。
 
-yt-dlp 有約 1800 個站點的 extractor，靠一整個社群在追各站的改版。與其自己維護一份注定
-落後的規則，不如驅動它，並且**讓它能獨立更新**——所以 yt-dlp 不包進安裝檔，而是放在資料
-夾裡，介面上有「更新 yt-dlp」按鈕。站點一改版，按一下就跟上，不必等 Haul 重新發布。
+yt-dlp 有約 1800 個站點的 extractor，靠一整個社群追各站改版。與其自己維護一份注定
+落後的規則，不如驅動它，並且**讓它能獨立更新**——所以 yt-dlp 不包進安裝檔，而是放在
+資料夾裡，隨時可以 `haul update`。
+
+但 yt-dlp 對某些站是**政策性拒絕**（例如 suno.com 會回 `[Liability] This website is not
+supported and will not be supported`），所以另有一層直接抓取的後備。後備的站點規則
+本質上脆弱，但它壞掉只影響那幾個站，不會拖垮整個工具。
 
 ### 驗證閘門
 
-「抓下來的一定要能播」是流程保證的，不是靠祈禱。檔案先落在暫存區，過關才搬進正式資料夾：
+「抓下來的一定要能播」是流程保證的。檔案先落在暫存區，過關才搬進正式資料夾：
 
 | 對象 | 做法 |
 | --- | --- |
-| 音訊 | [symphonia](https://github.com/pdeljanov/Symphonia) 在程序內完整解碼，並確認 RMS 高於 -70 dB（無聲代表拿到空殼） |
-| 音訊（symphonia 不認得的編碼） | 退回用 ffmpeg 裁決。symphonia 沒有 opus 解碼器，而 YouTube 常用 webm/opus——沒有這層退路，好檔案會被誤判成壞檔，那比不檢查還糟 |
-| 影片 | 在開頭、中間、接近結尾三個時間點各解幾個 frame。完整解一部 1080p 影片要幾十秒 CPU，抽樣壓到一秒內又足以抓到截斷 |
+| 位元組數 | 必須與 `Content-Length` 相符——抓截斷最可靠的方式 |
+| 音訊 | [symphonia](https://github.com/pdeljanov/Symphonia) 在程序內完整解碼，並確認 RMS 高於 -70 dB |
+| 音訊（symphonia 不認得的編碼） | 退回 ffmpeg 裁決。symphonia 沒有 opus 解碼器而 YouTube 常用 webm/opus——沒有這層退路，好檔案會被誤判成壞檔，那比不檢查還糟 |
+| 影片 | 在開頭、中間、接近結尾三個時間點各解幾個 frame。完整解一部 1080p 要幾十秒 CPU，抽樣壓到一秒內又足以抓到截斷 |
 
-沒過就刪檔，並在介面上寫明原因，不會默默留下一個放不出來的檔案。
-
-判斷只看 ffmpeg 的離開碼，不去解析它的人類可讀輸出——那個格式會隨版本改。
-
-### 資源用量
-
-| | |
-| --- | --- |
-| 記憶體 | 約 100 MB（大半是系統 WebView，非本程式） |
-| 同時下載 | 3 項 |
-| 同時驗證 | 2 項（解碼吃 CPU，刻意壓低以免跟其他程式搶） |
+沒過就刪檔並寫明原因。判斷只看 ffmpeg 的離開碼，不解析它的人類可讀輸出——那個格式會隨版本改。
 
 ## 從原始碼建置
 
 只需要 Rust，不需要 Node/npm——前端就是一支手寫的 `ui/index.html`。
 
 ```bash
-cargo install tauri-cli --version "^2" --locked
+cargo build --release --workspace     # CLI 在 target/release/haul
 
-cargo tauri dev      # 開發模式
-cargo tauri build    # 打包安裝檔
+cargo install tauri-cli --version "^2" --locked
+cd src-tauri && cargo tauri build     # GUI 安裝檔
 ```
 
 macOS 上要出 Universal 2：
 
 ```bash
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
-cargo tauri build --target universal-apple-darwin
+cd src-tauri && cargo tauri build --target universal-apple-darwin
 ```
 
 ### 測試
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --workspace
 ```
 
 有兩個需要真實素材的測試，設了環境變數才會跑（CI 上不設，所以會跳過）：
 
 ```bash
 # 驗證閘門會接受真實音檔，而不是「什麼都拒絕」還一路綠燈
-HAUL_TEST_MEDIA=/path/to/real.mp3 cargo test --manifest-path src-tauri/Cargo.toml
+HAUL_TEST_MEDIA=/path/to/real.mp3 cargo test --workspace
 
 # 端對端：取得工具 → 解析 → 下載 → 驗證。單元測試證明不了這條鏈路。
-HAUL_E2E_URL=https://... cargo test --manifest-path src-tauri/Cargo.toml end_to_end -- --nocapture
-HAUL_E2E_AUDIO=1 HAUL_E2E_URL=https://... cargo test --manifest-path src-tauri/Cargo.toml end_to_end -- --nocapture
+HAUL_E2E_URL=https://... cargo test --workspace end_to_end -- --nocapture
 ```
 
 ## 發布
 
-推一個 `v` 開頭的 tag，CI 會在 macOS 與 Windows 上各建一份並開一個草稿 release：
+推一個 `v` 開頭的 tag，CI 會在 macOS 與 Windows 上各建一份 GUI 安裝檔與 CLI 二進位，
+並開一個草稿 release：
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
@@ -125,11 +153,16 @@ git tag v0.1.0 && git push origin v0.1.0
 ## 專案結構
 
 ```
-ui/index.html          前端（單檔，無建置步驟、無外部字體）
-src-tauri/src/
-  main.rs              視窗、佇列、限流、檔名消毒
-  tools.rs             yt-dlp / ffmpeg 的取得與更新
-  extract.rs           驅動 yt-dlp 解析與下載
-  verify.rs            驗證閘門
-.github/workflows/     ci（fmt + clippy + test）、release（雙平台打包）
+core/          haul-core：下載引擎。不知道 UI 的存在，透過 Sink 回呼送事件
+  engine.rs      佇列、限流、驗證流程、檔名處理、歷史
+  extract.rs     驅動 yt-dlp
+  direct.rs      yt-dlp 拒絕時的後備（裸媒體連結、Suno）
+  tools.rs       取得與更新 yt-dlp / ffmpeg
+  verify.rs      驗證閘門
+cli/           haul：命令列外殼，把事件印成 NDJSON
+src-tauri/     haul-gui：圖形外殼，把事件轉成 Tauri event
+ui/index.html  前端（單檔，無建置步驟、無外部字體）
+.claude/skills/haul/   給 AI agent 的使用說明
 ```
+
+GUI 與 CLI 都只是同一個引擎的外殼，行為不會分岔。

@@ -36,7 +36,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> target
+          workspaces: . -> target
           key: ${{ matrix.target }}
 
       - uses: tauri-apps/tauri-action@v0
@@ -54,3 +54,25 @@ jobs:
             - Windows：SmartScreen 出現時選「更多資訊 → 仍要執行」
           releaseDraft: true
           prerelease: false
+
+      # CLI 是給腳本與 AI agent 用的介面，也要能拿得到，
+      # 不然使用者只有 GUI 沒有 haul 指令
+      - name: build CLI
+        run: cargo build --release -p haul-cli
+
+      - name: attach CLI to the release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            src=target/release/haul.exe
+            dst=haul-${{ matrix.target }}.exe
+          else
+            src=target/release/haul
+            dst=haul-${{ matrix.target }}
+          fi
+          cp "$src" "$dst"
+          gh release upload "${{ github.ref_name }}" "$dst" --clobber

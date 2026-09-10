@@ -1,0 +1,34 @@
+[workspace]
+members = ["core", "cli", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+
+[workspace.dependencies]
+haul-core = { path = "core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+futures-util = "0.3"
+tokio = { version = "1", features = [
+    "rt-multi-thread", "macros", "fs", "sync", "time", "process", "io-util",
+] }
+# rustls 而非 OpenSSL：Windows 上不需要額外裝任何東西就能編譯
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls", "stream", "gzip", "brotli", "http2", "charset",
+] }
+# 純 Rust 解碼，驗證檔案能不能播
+symphonia = { version = "0.5", features = ["mp3", "isomp4", "aac"] }
+
+[profile.release]
+# 解碼是唯一吃 CPU 的地方，所以優化速度而非體積。
+# 刻意不設 panic = "abort"：驗證跑在 spawn_blocking 上，靠 unwinding
+# 才能把畸形檔案造成的 panic 收成「這一項失敗」而不是整個程序掛掉。
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

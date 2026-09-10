@@ -1,0 +1,93 @@
+---
+name: haul
+description: Use when the user wants to download video, audio, or music from a URL — YouTube, Bilibili, SoundCloud, Bandcamp, Suno, archive.org, Twitter/X, or a direct media link. Also use for "download this video", "抓這個影片", "下載這首歌", "把這個存下來", saving a playlist or channel locally, extracting audio from a video, or checking what was downloaded before. Handles ~1800 sites via yt-dlp, verifies every file actually plays before keeping it.
+---
+
+# Haul
+
+貼網址下載影片或音訊，每個檔案都通過驗證閘門才留下。
+
+## 核心：離開碼就是答案
+
+`haul` 跟直接呼叫 `yt-dlp` 的差別只有一個——**它會驗證檔案真的能播才回傳成功**。
+
+| 離開碼 | 意思 |
+| --- | --- |
+| `0` | 每一項都下載完成、通過驗證。檔案存在且真的能播 |
+| `1` | 有項目失敗（stderr 寫明原因） |
+| `2` | 用法錯誤，或準備 yt-dlp / ffmpeg 失敗 |
+
+**不要自己去檢查檔案存不存在或大小對不對**，那些 haul 已經做過了（位元組數比對、完整解碼、無聲偵測、影片抽樣）。直接看離開碼。
+
+## 用法
+
+```bash
+haul <網址>...                      # 下載影片
+haul -a <網址>...                   # 只要聲音（抽原始音軌，不重新編碼）
+haul -o /path/to/dir <網址>         # 指定輸出資料夾（預設 ~/Downloads/Haul）
+haul -c 5 <網址>...                 # 同時下載 5 個（預設 3）
+haul status                         # 列出歷史
+haul update                         # 更新 yt-dlp
+```
+
+播放清單、頻道、個人頁直接貼，haul 會自己展開成一項一項。
+
+## 給程式讀的輸出
+
+`--json` 讓每個狀態變化印成一行 NDJSON 到 **stdout**（人類看的進度走 stderr，所以重導向不會混在一起）：
+
+```bash
+haul --json <網址> > events.jsonl
+```
+
+```jsonl
+{"event":"item","id":1,"status":"downloading","title":"…","bytes":8388608,"total":45568216}
+{"event":"item","id":1,"status":"done","title":"…","file":"…​.mp4","path":"/Users/…/x.mp4","secs":222.8}
+{"event":"item","id":2,"status":"failed","title":"…","error":"…"}
+```
+
+拿剛下載好的檔案路徑：
+
+```bash
+haul --json <網址> | jq -r 'select(.status=="done") | .path'
+```
+
+## 查歷史
+
+`haul status` 讀的是輸出資料夾裡的 `.haul-history.jsonl`。**不需要 GUI 在跑**，也沒有任何 daemon 或 port——狀態檔本身就是介面。
+
+```bash
+haul status --json | jq -r 'select(.status=="done") | .path'   # 所有可播的檔案
+haul status --json | jq -r 'select(.status=="failed") | .error' # 失敗原因
+```
+
+檔案已經被刪掉的項目會自動從歷史裡濾掉，所以列出來的路徑都是真的還在。
+
+## 失敗了怎麼辦
+
+按這個順序判斷，**不要直接放棄或改用別的工具**：
+
+1. **錯誤訊息提到 extractor、格式解析、`Unable to extract`** → 站點改版了。跑 `haul update` 讓 yt-dlp 自我更新，然後重試一次。這是最常見的失敗原因。
+
+2. **`[Liability] This website is not supported`** → yt-dlp 對該站是政策性拒絕。haul 有直接抓取的後備路徑（目前涵蓋 suno.com 與裸媒體連結）；如果後備也沒有對應規則，這個站就是抓不到，據實回報即可。
+
+3. **HTTP 401 / 403** → 內容是私人的，或需要登入。haul 目前不帶 cookie，這種抓不到。
+
+4. **「驗證未通過」** → 檔案抓下來了但播不出來（截斷、損毀、整首無聲）。haul 已經把壞檔刪掉了。重試一次；若持續失敗，來源本身可能就有問題。
+
+5. **首次執行卡在準備工具** → haul 第一次會下載 yt-dlp 與 ffmpeg 約 80MB 到 app 資料夾。需要網路。
+
+## 做不到的事
+
+- **DRM 保護的串流**（Netflix、Spotify、Apple Music 這類走 Widevine 的）完全不處理
+- **需要登入的內容**目前沒有帶 cookie
+- 不要嘗試繞過上面兩項
+
+## 沒安裝的話
+
+```bash
+cd <haul repo> && cargo build --release --workspace
+# 二進位在 target/release/haul
+```
+
+同一份引擎另外有 GUI（`haul-gui`），兩者共用 yt-dlp / ffmpeg 與歷史檔，可以混著用。

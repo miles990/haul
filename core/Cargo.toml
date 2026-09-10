@@ -1,0 +1,16 @@
+[package]
+name = "haul-core"
+description = "Haul 的下載引擎：解析、下載、驗證、檔名處理"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+symphonia.workspace = true

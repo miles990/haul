@@ -30,7 +30,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         if s == "audio" {
             Mode::Audio
         } else {
@@ -273,10 +273,10 @@ mod tests {
 
     #[test]
     fn mode_parsing() {
-        assert_eq!(Mode::from_str("audio"), Mode::Audio);
-        assert_eq!(Mode::from_str("video"), Mode::Video);
+        assert_eq!(Mode::parse("audio"), Mode::Audio);
+        assert_eq!(Mode::parse("video"), Mode::Video);
         // 認不得的一律當影片，不要因為前端傳錯字就整個壞掉
-        assert_eq!(Mode::from_str("nonsense"), Mode::Video);
+        assert_eq!(Mode::parse("nonsense"), Mode::Video);
     }
 
     #[test]
