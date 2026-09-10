@@ -199,6 +199,23 @@ pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<()> 
     }
 }
 
+/// 從 ffmpeg 的 stderr 裡挑出「真正跟解碼有關」的抱怨。
+///
+/// 用 `-ss` 跳進串流中段時，輸出端的 null muxer 會抗議時間戳重疊
+/// （`non monotonically increasing dts to muxer`），但畫面本身完全正常。
+/// 我們是在解碼不是在封裝，muxer 的意見按定義就與這件事無關，所以整路濾掉。
+///
+/// 這不是良性訊息白名單——那種清單會一直漏。這是依訊息來源分類：
+/// `[null @ …]` 一定是輸出 muxer，其餘（demuxer、解碼器）都保留。
+fn decode_complaints(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| !l.starts_with("[null @"))
+        .collect()
+}
+
 /// 影片要抽樣的時間點。開頭附近、中間、接近結尾——
 /// 截斷的檔案一定會在最後那個點爆掉。
 fn sample_points(secs: f64) -> Vec<f64> {
@@ -228,14 +245,19 @@ pub async fn verify_video(ffmpeg: &Path, file: &Path, secs: f64) -> Result<()> {
             .await
             .map_err(|e| anyhow!("執行 ffmpeg 失敗：{e}"))?;
 
+        let msg = String::from_utf8_lossy(&out.stderr);
+
         if !out.status.success() {
-            let msg = String::from_utf8_lossy(&out.stderr);
-            let first = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            let first = decode_complaints(&msg)
+                .first()
+                .copied()
+                .unwrap_or("ffmpeg 未說明原因");
             bail!("第 {t:.0} 秒解不出畫面：{first}");
         }
-        let msg = String::from_utf8_lossy(&out.stderr);
-        if !msg.trim().is_empty() {
-            let first = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+
+        // 離開碼是主要訊號，但解碼器有時會記錯誤卻仍以 0 結束，
+        // 所以額外看有沒有真正的解碼抱怨
+        if let Some(first) = decode_complaints(&msg).first() {
             bail!("第 {t:.0} 秒畫面有問題：{first}");
         }
     }
@@ -264,6 +286,36 @@ mod tests {
     fn missing_mean_volume_is_none_not_zero() {
         // 取不到要回 None（不判定），回 Some(0.0) 會變成「很大聲」的誤判
         assert_eq!(parse_mean_volume("nothing useful here"), None);
+    }
+
+    /// 真實案例：一支 AV1 1080p 的 B 站影片完全正常，但用 -ss 跳到中段抽樣時
+    /// null muxer 會抱怨時間戳重疊。舊版把「stderr 非空」當成失敗，於是好檔案
+    /// 被判定成壞檔 —— 這種假陰性比不檢查還糟。
+    #[test]
+    fn muxer_timestamp_complaints_are_not_decode_errors() {
+        let s = "[null @ 0x12c805720] Application provided invalid, non monotonically \
+                 increasing dts to muxer in stream 0: 2 >= 2";
+        assert!(decode_complaints(s).is_empty());
+    }
+
+    #[test]
+    fn real_decoder_and_demuxer_errors_survive_the_filter() {
+        let s = "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x133904080] stream 1, contradictionary STSC and STCO";
+        assert_eq!(decode_complaints(s).len(), 1);
+
+        let s = "[av1 @ 0x600002] Failed to decode frame";
+        assert_eq!(decode_complaints(s).len(), 1);
+    }
+
+    #[test]
+    fn mixed_output_keeps_only_the_real_problem() {
+        let s = "[null @ 0x1] non monotonically increasing dts to muxer in stream 0: 2 >= 2\n\
+                 \n\
+                 [h264 @ 0x2] error while decoding MB 12 4\n\
+                 [null @ 0x1] non monotonically increasing dts to muxer in stream 0: 5 >= 5";
+        let got = decode_complaints(s);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].contains("error while decoding"));
     }
 
     #[test]

@@ -33,6 +33,7 @@ haul <網址>...                # 下載影片
 haul -a <網址>...             # 只要聲音（抽原始音軌，不重新編碼）
 haul -o <資料夾> <網址>       # 指定輸出位置
 haul status                   # 列出歷史
+haul logs                     # 看執行紀錄（診斷失敗用）
 haul update                   # 更新 yt-dlp
 ```
 
@@ -61,6 +62,16 @@ haul --json <網址> | jq -r 'select(.status=="done") | .path'
 ```bash
 ln -s "$PWD/.claude/skills/haul" ~/.claude/skills/haul
 ```
+
+失敗時先看紀錄，那裡有完整原因（介面上只有一行摘要）：
+
+```bash
+haul logs --json | jq 'select(.level == "error")'
+```
+
+執行紀錄在 `~/Library/Application Support/com.haul.desktop/logs/`，一行一則 NDJSON，
+單檔 4 MB 輪替、保留 3 份。紀錄跟著安裝走而不是跟著 `-o` 走——診斷時不必回想當初
+輸出到哪個資料夾。
 
 `haul status` 讀的是輸出資料夾裡的 `.haul-history.jsonl`。**不需要 GUI 在跑，也沒有 daemon 或 port——狀態檔本身就是介面。** 那個檔是 append-only 的，所以 GUI 與 CLI 同時跑也不會互相蓋掉紀錄。
 
@@ -159,6 +170,7 @@ core/          haul-core：下載引擎。不知道 UI 的存在，透過 Sink �
   direct.rs      yt-dlp 拒絕時的後備（裸媒體連結、Suno）
   tools.rs       取得與更新 yt-dlp / ffmpeg
   verify.rs      驗證閘門
+  log.rs         執行紀錄與輪替
 cli/           haul：命令列外殼，把事件印成 NDJSON
 src-tauri/     haul-gui：圖形外殼，把事件轉成 Tauri event
 ui/index.html  前端（單檔，無建置步驟、無外部字體）

@@ -7,7 +7,8 @@
 //! `--json` 會把每個狀態變化印成一行 NDJSON，方便程式解析。
 
 use haul_core::{
-    default_bin_dir, default_out_dir, load_history, Config, Engine, Event, Item, Mode,
+    default_bin_dir, default_log_dir, default_out_dir, load_history, log as hlog, Config, Engine,
+    Event, Item, Mode,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -19,12 +20,14 @@ const HELP: &str = r#"haul — 萬用媒體下載器
 用法
   haul <網址>...            下載並驗證，全部成功才回傳 0
   haul status               列出歷史紀錄
+  haul logs                 看執行紀錄（診斷失敗用）
   haul update               更新 yt-dlp（站點改版後用）
 
 選項
   -a, --audio               只要聲音（抽出原始音軌，不重新編碼）
   -o, --out <資料夾>        輸出位置（預設 ~/Downloads/Haul）
   -c, --concurrency <N>     同時下載幾個（預設 3）
+  -n, --lines <N>           logs 要看幾則（預設 50）
       --json                每個事件一行 NDJSON 到 stdout
   -h, --help                顯示這則說明
 
@@ -37,11 +40,13 @@ const HELP: &str = r#"haul — 萬用媒體下載器
   haul https://example.com/watch/abc
   haul -a --json https://example.com/playlist/xyz
   haul status --json | jq 'select(.status == "done") | .path'
+  haul logs --json | jq 'select(.level == "error")'
 "#;
 
 enum Cmd {
     Get,
     Status,
+    Logs,
     Update,
     Help,
 }
@@ -53,6 +58,7 @@ struct Args {
     out: PathBuf,
     json: bool,
     concurrency: usize,
+    lines: usize,
 }
 
 fn parse() -> Result<Args, String> {
@@ -63,6 +69,7 @@ fn parse() -> Result<Args, String> {
         out: default_out_dir(),
         json: false,
         concurrency: 3,
+        lines: 50,
     };
 
     let mut it = std::env::args().skip(1).peekable();
@@ -89,7 +96,15 @@ fn parse() -> Result<Args, String> {
                     return Err("--concurrency 至少要是 1".into());
                 }
             }
+            "-n" | "--lines" => {
+                a.lines = it
+                    .next()
+                    .ok_or("--lines 後面要接數字")?
+                    .parse()
+                    .map_err(|_| "--lines 要接數字".to_string())?;
+            }
             "status" if first => a.cmd = Cmd::Status,
+            "logs" if first => a.cmd = Cmd::Logs,
             "update" if first => a.cmd = Cmd::Update,
             s if s.starts_with("http") => a.urls.push(s.to_string()),
             s => return Err(format!("看不懂的參數：{s}")),
@@ -145,6 +160,7 @@ async fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Cmd::Status => return status(&args),
+        Cmd::Logs => return logs(&args),
         Cmd::Update => return update(&args).await,
         Cmd::Get => {}
     }
@@ -266,6 +282,35 @@ fn status(args: &Args) -> ExitCode {
     }
     let ok = items.iter().filter(|i| i.status == "done").count();
     println!("\n共 {} 筆，其中 {ok} 筆可播", items.len());
+    ExitCode::SUCCESS
+}
+
+/// 看執行紀錄。跟 status 一樣，讀的就是檔案本身，不需要任何 daemon。
+fn logs(args: &Args) -> ExitCode {
+    let path = default_log_dir().join("haul.log");
+    let entries = hlog::tail(&path, args.lines);
+
+    if args.json {
+        for e in &entries {
+            if let Ok(line) = serde_json::to_string(e) {
+                println!("{line}");
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    if entries.is_empty() {
+        println!("還沒有任何紀錄（{}）", path.display());
+        return ExitCode::SUCCESS;
+    }
+    for e in &entries {
+        let detail = if e.data.is_null() {
+            String::new()
+        } else {
+            format!("  {}", e.data)
+        };
+        println!("{}  {:<5} {}{}", e.time, e.level, e.event, detail);
+    }
     ExitCode::SUCCESS
 }
 

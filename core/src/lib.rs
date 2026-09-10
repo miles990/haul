@@ -6,12 +6,13 @@
 pub mod direct;
 pub mod engine;
 pub mod extract;
+pub mod log;
 pub mod tools;
 pub mod verify;
 
 pub use engine::{
-    default_bin_dir, default_out_dir, home_dir, load_history, open_with_system, sanitize,
-    validate_playable, Config, Engine, Event, Item, Sink,
+    default_bin_dir, default_log_dir, default_out_dir, home_dir, load_history, open_with_system,
+    sanitize, validate_playable, Config, Engine, Event, Item, Sink,
 };
 pub use extract::Mode;
 pub use tools::Tools;

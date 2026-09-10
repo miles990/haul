@@ -27,6 +27,7 @@ haul -a <網址>...                   # 只要聲音（抽原始音軌，不重�
 haul -o /path/to/dir <網址>         # 指定輸出資料夾（預設 ~/Downloads/Haul）
 haul -c 5 <網址>...                 # 同時下載 5 個（預設 3）
 haul status                         # 列出歷史
+haul logs                           # 看執行紀錄（診斷失敗用）
 haul update                         # 更新 yt-dlp
 ```
 
@@ -65,7 +66,15 @@ haul status --json | jq -r 'select(.status=="failed") | .error' # 失敗原因
 
 ## 失敗了怎麼辦
 
-按這個順序判斷，**不要直接放棄或改用別的工具**：
+**第一步永遠是看紀錄**，介面與 stdout 上只有一行摘要，完整原因在這裡：
+
+```bash
+haul logs --json | jq 'select(.level == "error")'
+haul logs -n 30                                    # 人看的版本
+```
+
+紀錄裡的 `input.resolved` 會告訴你走的是 `ytdlp` 還是 `direct` 後備，
+`item.failed` 帶完整錯誤字串。看過之後再按下面判斷，**不要直接放棄或改用別的工具**：
 
 1. **錯誤訊息提到 extractor、格式解析、`Unable to extract`** → 站點改版了。跑 `haul update` 讓 yt-dlp 自我更新，然後重試一次。這是最常見的失敗原因。
 
@@ -90,4 +99,15 @@ cd <haul repo> && cargo build --release --workspace
 # 二進位在 target/release/haul
 ```
 
-同一份引擎另外有 GUI（`haul-gui`），兩者共用 yt-dlp / ffmpeg 與歷史檔，可以混著用。
+同一份引擎另外有 GUI（`haul-gui`），兩者共用 yt-dlp / ffmpeg、歷史檔與執行紀錄，可以混著用。
+
+## 檔案在哪
+
+| 用途 | 位置 |
+| --- | --- |
+| 下載的檔案 | `~/Downloads/Haul`（可用 `-o` 改） |
+| 歷史 | 輸出資料夾裡的 `.haul-history.jsonl`（append-only） |
+| 執行紀錄 | `~/Library/Application Support/com.haul.desktop/logs/haul.log`（4MB 輪替、保留 3 份） |
+| yt-dlp / ffmpeg | 同上目錄的 `bin/` |
+
+紀錄跟著安裝走而不是跟著 `-o` 走——診斷時不必回想當初輸出到哪個資料夾。

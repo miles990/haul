@@ -6,6 +6,7 @@
 
 use crate::direct;
 use crate::extract::{self, Mode, Probe};
+use crate::log::Logger;
 use crate::tools::{self, Tools};
 use crate::verify;
 
@@ -63,6 +64,9 @@ pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
 pub struct Config {
     pub out_dir: PathBuf,
     pub bin_dir: PathBuf,
+    /// 執行紀錄放哪。紀錄是診斷資料不是使用者資料，所以跟著安裝走，
+    /// 不跟著 --out 走。
+    pub log_dir: PathBuf,
     pub max_downloads: usize,
     pub max_verifies: usize,
 }
@@ -72,6 +76,7 @@ impl Config {
         Self {
             out_dir,
             bin_dir,
+            log_dir: default_log_dir(),
             max_downloads: 3,
             max_verifies: 2,
         }
@@ -110,6 +115,7 @@ pub struct Engine {
     seen: Mutex<HashSet<String>>,
     client: reqwest::Client,
     tools: OnceCell<Tools>,
+    log: Logger,
     dl: Semaphore,
     vf: Semaphore,
     next_id: AtomicU64,
@@ -131,7 +137,17 @@ impl Engine {
             .connect_timeout(Duration::from_secs(15))
             .build()?;
 
+        let log = Logger::new(&cfg.log_dir)?;
+        log.info(
+            "engine.start",
+            serde_json::json!({
+                "out": cfg.out_dir.display().to_string(),
+                "restored": past.len(),
+            }),
+        );
+
         Ok(Arc::new(Self {
+            log,
             dl: Semaphore::new(cfg.max_downloads),
             vf: Semaphore::new(cfg.max_verifies),
             cfg,
@@ -231,10 +247,19 @@ impl Engine {
 
     fn fail(&self, id: u64, why: impl Into<String>) {
         let why = why.into();
+        // 失敗的完整原因是紀錄最有價值的部分 —— 介面上只看得到一行，
+        // 診斷時需要的是這裡
+        self.log
+            .error("item.failed", serde_json::json!({ "id": id, "error": why }));
         self.finish(id, |i| {
             i.status = "failed".into();
             i.error = Some(why);
         });
+    }
+
+    /// 對外開放紀錄，讓外殼能記自己的事件（例如 CLI 記下呼叫參數）
+    pub fn log(&self) -> &Logger {
+        &self.log
     }
 
     /// 取得（必要時先下載）yt-dlp 與 ffmpeg。多個呼叫者只會下載一次。
@@ -253,11 +278,20 @@ impl Engine {
 
                 match result {
                     Ok(t) => {
+                        self.log.info(
+                            "tools.ready",
+                            serde_json::json!({
+                                "ytdlp": t.ytdlp.display().to_string(),
+                                "ffmpeg": t.ffmpeg.display().to_string(),
+                            }),
+                        );
                         self.emit(Event::SetupDone);
                         Ok(t)
                     }
                     Err(e) => {
                         let msg = e.to_string();
+                        self.log
+                            .error("tools.failed", serde_json::json!({ "error": msg }));
                         self.emit(Event::SetupFailed { error: msg.clone() });
                         Err(msg)
                     }
@@ -341,6 +375,21 @@ impl Engine {
                 }
             }
         }
+
+        self.log.info(
+            "input.resolved",
+            serde_json::json!({
+                "id": id,
+                "input": input,
+                "items": jobs.len(),
+                "source": match jobs.first().map(|(_, j)| j) {
+                    Some(Job::Ytdlp { .. }) => "ytdlp",
+                    Some(Job::Direct { .. }) => "direct",
+                    None => "none",
+                },
+                "mode": if mode == Mode::Audio { "audio" } else { "video" },
+            }),
+        );
 
         jobs.into_iter()
             .map(|(item_id, job)| {
@@ -473,6 +522,16 @@ impl Engine {
             .await
             .map(|m| m.len())
             .unwrap_or(0);
+
+        self.log.info(
+            "item.done",
+            serde_json::json!({
+                "id": id,
+                "path": full,
+                "bytes": size,
+                "secs": reported.or(secs),
+            }),
+        );
 
         self.finish(id, |i| {
             i.status = "done".into();
@@ -686,6 +745,14 @@ pub fn home_dir() -> PathBuf {
 
 pub fn default_out_dir() -> PathBuf {
     home_dir().join("Downloads").join("Haul")
+}
+
+/// 執行紀錄的存放處
+pub fn default_log_dir() -> PathBuf {
+    default_bin_dir()
+        .parent()
+        .map(|p| p.join("logs"))
+        .unwrap_or_else(|| home_dir().join(".haul-logs"))
 }
 
 /// yt-dlp 與 ffmpeg 的存放處。GUI 與 CLI 必須算出同一個路徑，
