@@ -58,7 +58,22 @@ jobs:
       # CLI 是給腳本與 AI agent 用的介面，也要能拿得到，
       # 不然使用者只有 GUI 沒有 haul 指令
       - name: build CLI
-        run: cargo build --release -p haul-cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # Tauri 會自己把 GUI lipo 成 universal，但 cargo build 只建主機
+            # 架構。不自己合併的話，檔名承諾 universal 卻只有 arm64，
+            # Intel Mac 下載後會是「Bad CPU type in executable」。
+            cargo build --release -p haul-cli --target aarch64-apple-darwin
+            cargo build --release -p haul-cli --target x86_64-apple-darwin
+            lipo -create -output haul-cli-universal \
+              target/aarch64-apple-darwin/release/haul \
+              target/x86_64-apple-darwin/release/haul
+            lipo -info haul-cli-universal
+          else
+            cargo build --release -p haul-cli
+          fi
 
       - name: attach CLI to the release
         if: github.ref_type == 'tag'
@@ -71,7 +86,7 @@ jobs:
             src=target/release/haul.exe
             dst=haul-${{ matrix.target }}.exe
           else
-            src=target/release/haul
+            src=haul-cli-universal
             dst=haul-${{ matrix.target }}
           fi
           cp "$src" "$dst"

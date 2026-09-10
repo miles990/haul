@@ -11,6 +11,9 @@
 | 平台 | GUI | CLI |
 | --- | --- | --- |
 | macOS | `Haul_x.y.z_universal.dmg`（Intel 與 Apple Silicon 通用） | `haul-universal-apple-darwin` |
+
+v0.1.0 的 CLI 資產是 `haul-aarch64-apple-darwin`（僅 Apple Silicon）。當時的
+workflow 只建了主機架構，已修正，下個版本起會是真正的 universal。
 | Windows | `Haul_x.y.z_x64-setup.exe` | `haul-x86_64-pc-windows-msvc.exe` |
 
 沒有做程式碼簽章，首次開啟需要放行一次：
