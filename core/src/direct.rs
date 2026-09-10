@@ -100,14 +100,28 @@ fn decode_entities(s: &str) -> String {
     out
 }
 
-pub fn looks_like_media_url(url: &str) -> bool {
+/// 網址本身就指向一個檔案。
+///
+/// 這個判斷要放在解析鏈的最前面：yt-dlp 的 generic extractor 與 gallery-dl 的
+/// directlink extractor 都宣稱吃得下裸檔案網址，於是同一個網址在不同時候會被
+/// 不同的工具接走 —— 實測同一張 jpg 三次跑出兩種路徑（yt-dlp 第一次被限流就
+/// 換 gallery-dl 接手），產生不同檔名與不同驗證等級。解析結果必須是確定的。
+pub fn looks_like_file_url(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or(url);
     matches!(
         path.rsplit('.')
             .next()
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("mp4" | "m4a" | "mp3" | "webm" | "mkv" | "mov" | "wav" | "flac" | "opus" | "ogg")
+        Some(
+            // 影音
+            "mp4" | "m4a" | "mp3" | "webm" | "mkv" | "mov" | "wav" | "flac" | "opus" | "ogg"
+            | "aac" | "m4v" | "avi"
+            // 圖片
+            | "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "avif" | "heic" | "tif" | "tiff"
+            // 文件與封存
+            | "pdf" | "zip" | "epub" | "cbz" | "txt" | "csv" | "json" | "srt" | "vtt"
+        )
     )
 }
 
@@ -205,7 +219,7 @@ async fn suno(client: &Client, page_url: &str) -> Result<Found> {
 /// 試著在不靠 yt-dlp 的情況下找出媒體檔。找不到就回 Err，呼叫端據此
 /// 決定要回報哪個錯誤。
 pub async fn probe(client: &Client, url: &str, allow_html: bool) -> Result<Found> {
-    if looks_like_media_url(url) {
+    if looks_like_file_url(url) {
         let title = url
             .split('?')
             .next()
@@ -286,8 +300,9 @@ async fn any_file(client: &Client, url: &str, allow_html: bool) -> Result<Found>
                 .trim_end_matches('/')
                 .rsplit('/')
                 .next()
-                .map(str::to_string)
                 .filter(|s| !s.is_empty() && s.contains('.'))
+                // 去掉副檔名：搬移時會依實際檔案補上，這裡留著會變成 a.jpg.jpg
+                .and_then(|f| f.rsplit_once('.').map(|(stem, _)| stem.to_string()))
         })
         .unwrap_or_else(|| {
             url.split("://")
@@ -475,11 +490,18 @@ mod tests {
     }
 
     #[test]
-    fn recognises_bare_media_urls() {
-        assert!(looks_like_media_url("https://x.com/a/b.mp4"));
-        assert!(looks_like_media_url("https://x.com/a/b.MP3?token=1"));
-        assert!(!looks_like_media_url("https://x.com/watch/abc"));
-        assert!(!looks_like_media_url("https://suno.com/song/abc"));
+    fn recognises_bare_file_urls() {
+        assert!(looks_like_file_url("https://x.com/a/b.mp4"));
+        assert!(looks_like_file_url("https://x.com/a/b.MP3?token=1"));
+        // 圖片與文件也算，否則會被 yt-dlp 或 gallery-dl 隨機接走
+        assert!(looks_like_file_url("https://x.com/a/b.jpg"));
+        assert!(looks_like_file_url("https://x.com/a/b.pdf"));
+        // 頁面不算
+        assert!(!looks_like_file_url("https://x.com/watch/abc"));
+        assert!(!looks_like_file_url("https://suno.com/song/abc"));
+        assert!(!looks_like_file_url(
+            "https://commons.wikimedia.org/wiki/Category:Cats"
+        ));
     }
 
     #[test]

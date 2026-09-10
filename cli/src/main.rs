@@ -28,6 +28,7 @@ const HELP: &str = r#"haul — 萬用媒體下載器
   -i, --image               只要封面圖／縮圖
   -q, --quality <N|best>    影片畫質上限，例如 1080（預設不設限）
       --any                 連網頁本身也存下來（預設拒絕，避免假成功）
+      --overwrite           目標檔案已存在時照樣重抓（預設跳過）
   -o, --out <資料夾>        輸出位置（預設 ~/Downloads/Haul）
   -c, --concurrency <N>     同時下載幾個（預設 3）
   -n, --lines <N>           logs 要看幾則（預設 50）
@@ -59,6 +60,7 @@ struct Args {
     urls: Vec<String>,
     mode: Mode,
     any: bool,
+    overwrite: bool,
     max_height: Option<u32>,
     out: PathBuf,
     json: bool,
@@ -72,6 +74,7 @@ fn parse() -> Result<Args, String> {
         urls: Vec::new(),
         mode: Mode::Video,
         any: false,
+        overwrite: false,
         max_height: None,
         out: default_out_dir(),
         json: false,
@@ -88,6 +91,7 @@ fn parse() -> Result<Args, String> {
             "-a" | "--audio" => a.mode = Mode::Audio,
             "-i" | "--image" => a.mode = Mode::Image,
             "--any" => a.any = true,
+            "--overwrite" => a.overwrite = true,
             "-q" | "--quality" => {
                 let v = it.next().ok_or("--quality 後面要接數字或 best")?;
                 a.max_height = if v.eq_ignore_ascii_case("best") {
@@ -240,6 +244,7 @@ async fn main() -> ExitCode {
     let mut cfg = Config::new(args.out.clone(), default_bin_dir());
     cfg.max_downloads = args.concurrency;
     cfg.allow_html = args.any;
+    cfg.overwrite = args.overwrite;
 
     let eng = match Engine::new(cfg, sink) {
         Ok(e) => e,

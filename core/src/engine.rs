@@ -73,6 +73,9 @@ pub struct Config {
     pub log_dir: PathBuf,
     /// 允許把網頁本身當檔案存下來。預設 false —— 假成功比失敗更糟。
     pub allow_html: bool,
+    /// 目標檔案已存在時照樣重新下載。預設 false：補齊一個部分失敗的
+    /// 圖庫時，重跑不該產生一堆 xxx (2).jpg。
+    pub overwrite: bool,
     pub max_downloads: usize,
     pub max_verifies: usize,
 }
@@ -84,6 +87,7 @@ impl Config {
             bin_dir,
             log_dir: default_log_dir(),
             allow_html: false,
+            overwrite: false,
             max_downloads: 3,
             max_verifies: 2,
         }
@@ -406,6 +410,9 @@ impl Engine {
                 "items": jobs.len(),
                 "source": match jobs.first().map(|(_, j)| j) {
                     Some(Job::Ytdlp { .. }) => "ytdlp",
+                    // 圖庫項目也是 Job::Direct，靠 subdir 分辨，
+                    // 否則診斷時看不出是哪條路徑接走的
+                    Some(Job::Direct { subdir: Some(_), .. }) => "gallery",
                     Some(Job::Direct { .. }) => "direct",
                     None => "none",
                 },
@@ -424,6 +431,22 @@ impl Engine {
 
     /// 決定一個輸入該怎麼抓
     async fn resolve(&self, tools: &Tools, input: &str) -> Result<Resolution> {
+        // 一眼就是檔案的網址不要問任何萃取器。yt-dlp 與 gallery-dl 都宣稱
+        // 吃得下裸檔案網址，誰接手取決於當下網路狀況 —— 那會讓同一個輸入
+        // 在不同時候產生不同檔名與不同驗證等級。
+        if direct::looks_like_file_url(input) {
+            let found = direct::probe(&self.client, input, self.cfg.allow_html).await?;
+            return Ok(Resolution::Single {
+                job: Job::Direct {
+                    media: found.media,
+                    title: found.title.clone(),
+                    content_type: found.content_type,
+                    subdir: None,
+                },
+                title: found.title,
+            });
+        }
+
         match extract::probe(tools, input).await {
             Ok(Probe::Single { title }) => Ok(Resolution::Single {
                 job: Job::Ytdlp {
@@ -505,7 +528,51 @@ impl Engine {
         }
     }
 
+    /// 直接抓取時的目標路徑。下載前的「已存在就跳過」與下載後的搬移
+    /// 共用這個，否則兩邊算出不同名字時會跳過一個從未產生的檔案。
+    fn direct_dest(&self, job: &Job, mode: Mode) -> Option<PathBuf> {
+        let Job::Direct {
+            media,
+            title,
+            subdir,
+            ..
+        } = job
+        else {
+            // yt-dlp 自己決定檔名，下載前無從預測
+            return None;
+        };
+
+        let ext = direct_ext(media, mode);
+        let dir = match subdir {
+            Some(sub) => self.cfg.out_dir.join(sanitize(sub)),
+            None => self.cfg.out_dir.clone(),
+        };
+        Some(dir.join(format!("{}.{}", sanitize(title), ext)))
+    }
+
     async fn run(&self, tools: Tools, id: u64, job: Job, mode: Mode, opts: extract::Options) {
+        // 已經有這個檔案就不要再抓一次。補齊部分失敗的圖庫是常見動作，
+        // 重跑該是接續而不是製造一堆重複檔。
+        if !self.cfg.overwrite {
+            if let Some(dest) = self.direct_dest(&job, mode) {
+                if dest.is_file() {
+                    let name = dest
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let full = dest.to_string_lossy().to_string();
+                    return self.finish(id, |i| {
+                        i.status = "done".into();
+                        i.file = Some(name);
+                        i.path = Some(full);
+                        // 誠實標記：這個檔案這一輪並沒有被驗證過
+                        i.verified = Some("existing".into());
+                        i.error = Some("已經下載過了，跳過".into());
+                    });
+                }
+            }
+        }
+
         // 1. 下載（限流）
         let permit = match self.dl.acquire().await {
             Ok(p) => p,
@@ -790,6 +857,17 @@ fn is_video_container(ext: &str) -> bool {
     )
 }
 
+/// 直接抓取最後會產生的副檔名。音訊模式從影音容器抽出音軌後會變成 m4a，
+/// 所以不能直接用網址上的副檔名。
+fn direct_ext(media: &str, mode: Mode) -> String {
+    let ext = ext_of(media);
+    if mode == Mode::Audio && is_video_container(&ext) {
+        "m4a".to_string()
+    } else {
+        ext
+    }
+}
+
 fn ext_of(url: &str) -> String {
     url.split('?')
         .next()
@@ -974,6 +1052,18 @@ mod tests {
     fn short_takes_the_tail_of_a_url() {
         assert_eq!(short("https://example.com/watch/abc"), "abc");
         assert_eq!(short("https://example.com/watch/abc/"), "abc");
+    }
+
+    #[test]
+    fn direct_ext_matches_what_audio_mode_actually_produces() {
+        // 影音容器抽出音軌後是 m4a，跳過檢查若用網址上的 mp4 就會對不上，
+        // 於是永遠跳不掉、每次重跑都產生重複檔
+        assert_eq!(direct_ext("https://x.com/a.mp4", Mode::Audio), "m4a");
+        assert_eq!(direct_ext("https://x.com/a.mp4", Mode::Video), "mp4");
+        // 本來就是音檔就不動它
+        assert_eq!(direct_ext("https://x.com/a.mp3", Mode::Audio), "mp3");
+        // 圖片模式不受影響
+        assert_eq!(direct_ext("https://x.com/a.jpg", Mode::Image), "jpg");
     }
 
     #[test]
