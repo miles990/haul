@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "SunoDL",
+  "productName": "Haul",
   "version": "0.1.0",
-  "identifier": "com.sunodl.desktop",
+  "identifier": "com.haul.desktop",
   "build": {
     "frontendDist": "../ui"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "SunoDL",
+        "title": "Haul",
         "width": 760,
         "height": 640,
         "minWidth": 520,

@@ -160,7 +160,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn default_out_dir() -> PathBuf {
-    home_dir().join("Music").join("SunoDL")
+    home_dir().join("Downloads").join("Haul")
 }
 
 /// 掃掉上次沒下載完留下的暫存檔

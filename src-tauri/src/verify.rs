@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn rejects_non_audio() {
-        let dir = std::env::temp_dir().join("sunodl-test");
+        let dir = std::env::temp_dir().join("haul-test");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("garbage.mp3");
         std::fs::write(&p, b"this is definitely not an mp3 file, not even close").unwrap();
@@ -162,10 +162,10 @@ mod tests {
     }
 
     /// 只有負向測試的閘門，寫成「什麼都拒絕」也會全綠。
-    /// 指一個真實音檔給 SUNODL_TEST_MP3 就會跑這關；CI 上沒設就跳過。
+    /// 指一個真實音檔給 HAUL_TEST_MEDIA 就會跑這關；CI 上沒設就跳過。
     #[test]
     fn accepts_real_audio() {
-        let Some(p) = std::env::var_os("SUNODL_TEST_MP3") else {
+        let Some(p) = std::env::var_os("HAUL_TEST_MEDIA") else {
             return;
         };
         let v = verify(Path::new(&p)).expect("真實音檔應該通過驗證");
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn rejects_empty() {
-        let dir = std::env::temp_dir().join("sunodl-test");
+        let dir = std::env::temp_dir().join("haul-test");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("empty.mp3");
         std::fs::write(&p, b"").unwrap();

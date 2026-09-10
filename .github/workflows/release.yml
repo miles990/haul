@@ -45,7 +45,7 @@ jobs:
         with:
           args: --target ${{ matrix.target }}
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-dev-{0}', github.run_number) }}
-          releaseName: SunoDL ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+          releaseName: Haul ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
           releaseBody: |
             macOS 下載 `.dmg`（Intel 與 Apple Silicon 通用），Windows 下載 `.exe` 安裝檔。
 
