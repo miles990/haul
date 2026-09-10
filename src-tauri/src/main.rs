@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod song;
+mod direct;
+mod extract;
+mod tools;
 mod verify;
 
+use extract::{Mode, Probe};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -10,11 +13,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
 
-/// 同時下載幾首。3 條夠把頻寬吃滿，又不會把 CDN 惹毛。
+/// 同時下載幾個項目
 const MAX_DOWNLOADS: usize = 3;
-/// 同時驗證幾首。解碼吃 CPU，壓在 2 條以免跟使用者搶資源。
+/// 同時驗證幾個。解碼吃 CPU，壓低以免跟其他程式搶。
 const MAX_VERIFIES: usize = 2;
 /// 進度事件節流，避免把 webview 洗爆
 const PROGRESS_EVERY: Duration = Duration::from_millis(200);
@@ -27,6 +30,8 @@ struct Item {
     id: u64,
     input: String,
     title: String,
+    /// video | audio
+    kind: String,
     /// queued | resolving | downloading | verifying | done | failed
     status: String,
     bytes: u64,
@@ -36,35 +41,63 @@ struct Item {
     error: Option<String>,
 }
 
+#[derive(Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SetupEvent {
+    /// start | progress | done | failed
+    stage: String,
+    tool: String,
+    bytes: u64,
+    total: u64,
+    error: Option<String>,
+}
+
+/// 一個項目要怎麼抓。yt-dlp 是主力，Direct 是它拒絕或不認識時的後備。
+#[derive(Clone, Debug)]
+enum Job {
+    Ytdlp { url: String },
+    Direct { media: String, title: String },
+}
+
 struct AppState {
     items: Mutex<Vec<Item>>,
-    /// 已經排過的歌曲 id，避免同一首重複下載
     seen: Mutex<HashSet<String>>,
     out_dir: PathBuf,
+    staging: PathBuf,
+    bin_dir: PathBuf,
     client: reqwest::Client,
+    /// yt-dlp 與 ffmpeg。第一次要用到時才下載。
+    tools: OnceCell<tools::Tools>,
     dl: Semaphore,
     vf: Semaphore,
     next_id: AtomicU64,
 }
 
 impl AppState {
-    fn new(out_dir: PathBuf) -> anyhow::Result<Self> {
+    fn new(out_dir: PathBuf, bin_dir: PathBuf) -> anyhow::Result<Self> {
+        let staging = out_dir.join(".haul-part");
         Ok(Self {
             items: Mutex::new(Vec::new()),
             seen: Mutex::new(HashSet::new()),
             out_dir,
-            client: song::build_client()?,
+            staging,
+            bin_dir,
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .build()?,
+            tools: OnceCell::new(),
             dl: Semaphore::new(MAX_DOWNLOADS),
             vf: Semaphore::new(MAX_VERIFIES),
             next_id: AtomicU64::new(1),
         })
     }
 
-    fn push(&self, input: String, title: String) -> Item {
+    fn push(&self, input: String, title: String, kind: &str) -> Item {
         let item = Item {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             input,
             title,
+            kind: kind.to_string(),
             status: "queued".into(),
             bytes: 0,
             total: 0,
@@ -76,7 +109,7 @@ impl AppState {
         item
     }
 
-    /// 改一個項目並回傳改完的副本。鎖只在函式內存活，不跨 await。
+    /// 鎖只在函式內存活，不跨 await
     fn patch(&self, id: u64, f: impl FnOnce(&mut Item)) -> Option<Item> {
         let mut guard = self.items.lock().unwrap();
         let it = guard.iter_mut().find(|i| i.id == id)?;
@@ -89,11 +122,72 @@ fn state_of(app: &AppHandle) -> Arc<AppState> {
     app.state::<Arc<AppState>>().inner().clone()
 }
 
-/// 改狀態 + 推事件給前端，一步完成
 fn update(app: &AppHandle, st: &AppState, id: u64, f: impl FnOnce(&mut Item)) {
     if let Some(item) = st.patch(id, f) {
         let _ = app.emit("item", item);
     }
+}
+
+fn fail(app: &AppHandle, st: &AppState, id: u64, why: impl Into<String>) {
+    let why = why.into();
+    update(app, st, id, |i| {
+        i.status = "failed".into();
+        i.error = Some(why);
+    });
+}
+
+// ---------------------------------------------------------------- 外部工具
+
+/// 取得（必要時先下載）yt-dlp 與 ffmpeg。多個任務同時呼叫只會下載一次。
+async fn tools_ready(app: &AppHandle, st: &Arc<AppState>) -> Result<tools::Tools, String> {
+    let app2 = app.clone();
+    let client = st.client.clone();
+    let bin = st.bin_dir.clone();
+
+    st.tools
+        .get_or_try_init(|| async move {
+            let notify = app2.clone();
+            let result = tools::ensure(&client, &bin, move |tool, bytes, total| {
+                let _ = notify.emit(
+                    "setup",
+                    SetupEvent {
+                        stage: "progress".into(),
+                        tool: tool.to_string(),
+                        bytes,
+                        total,
+                        error: None,
+                    },
+                );
+            })
+            .await;
+
+            match result {
+                Ok(t) => {
+                    let _ = app2.emit(
+                        "setup",
+                        SetupEvent {
+                            stage: "done".into(),
+                            ..Default::default()
+                        },
+                    );
+                    Ok(t)
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = app2.emit(
+                        "setup",
+                        SetupEvent {
+                            stage: "failed".into(),
+                            error: Some(msg.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    Err(msg)
+                }
+            }
+        })
+        .await
+        .cloned()
 }
 
 // ---------------------------------------------------------------- 檔名
@@ -114,15 +208,12 @@ fn sanitize(name: &str) -> String {
         })
         .collect();
 
-    // 壓掉連續空白
     let mut s = replaced.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    // 以字元為單位截斷，不會切壞 UTF-8（中文歌名很重要）
+    // 以字元為單位截斷，不會切壞 UTF-8（中文與日文標題很重要）
     if s.chars().count() > 110 {
         s = s.chars().take(110).collect();
     }
-
-    // Windows: 檔名結尾不能是點或空白
     while s.ends_with('.') || s.ends_with(' ') {
         s.pop();
     }
@@ -163,152 +254,303 @@ fn default_out_dir() -> PathBuf {
     home_dir().join("Downloads").join("Haul")
 }
 
-/// 掃掉上次沒下載完留下的暫存檔
-fn sweep_parts(dir: &Path) {
-    if let Ok(rd) = std::fs::read_dir(dir) {
+/// 清掉上次沒下載完留下的暫存
+fn sweep(staging: &Path) {
+    if let Ok(rd) = std::fs::read_dir(staging) {
         for e in rd.flatten() {
-            if e.path().extension().is_some_and(|x| x == "part") {
-                let _ = std::fs::remove_file(e.path());
-            }
+            let p = e.path();
+            let _ = if p.is_dir() {
+                std::fs::remove_dir_all(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
         }
     }
 }
 
 // ---------------------------------------------------------------- 主流程
 
-/// 一筆輸入 → 展開成 N 首 → 每首各自排隊
-async fn handle_input(app: AppHandle, st: Arc<AppState>, input: String) {
-    let probe = st.push(input.clone(), format!("解析中… {}", short(&input)));
-    let _ = app.emit("item", probe.clone());
-    update(&app, &st, probe.id, |i| i.status = "resolving".into());
+fn short(s: &str) -> String {
+    let t = s.trim_end_matches('/').rsplit('/').next().unwrap_or(s);
+    t.chars().take(28).collect()
+}
 
-    let ids = match song::expand(&st.client, &input).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            update(&app, &st, probe.id, |i| {
-                i.status = "failed".into();
-                i.title = short(&input);
-                i.error = Some(e.to_string());
-            });
-            return;
+enum Resolution {
+    Single {
+        job: Job,
+        title: String,
+    },
+    Playlist {
+        title: String,
+        items: Vec<(Job, String)>,
+    },
+}
+
+/// 決定一個輸入該怎麼抓。刻意不碰 UI 狀態，這樣端對端測試才能直接跑
+/// 這條真正的路徑，而不是在測試裡另外抄一份邏輯。
+async fn resolve(
+    tools: &tools::Tools,
+    client: &reqwest::Client,
+    input: &str,
+) -> anyhow::Result<Resolution> {
+    match extract::probe(tools, input).await {
+        Ok(Probe::Single { title }) => Ok(Resolution::Single {
+            job: Job::Ytdlp {
+                url: input.to_string(),
+            },
+            title,
+        }),
+        Ok(Probe::Playlist { title, entries }) => Ok(Resolution::Playlist {
+            title,
+            items: entries
+                .into_iter()
+                .map(|e| {
+                    let label = e.title.clone().unwrap_or_else(|| short(&e.url));
+                    (Job::Ytdlp { url: e.url }, label)
+                })
+                .collect(),
+        }),
+        // yt-dlp 對某些站是政策性拒絕（例如 suno.com），不是還沒實作。
+        // 這種情況才輪到直接抓取。
+        Err(yt_err) => match direct::probe(client, input).await {
+            Ok(found) => Ok(Resolution::Single {
+                job: Job::Direct {
+                    media: found.media,
+                    title: found.title.clone(),
+                },
+                title: found.title,
+            }),
+            // 沒有直接規則時，該讓使用者看到的是 yt-dlp 的原因
+            Err(_) => Err(yt_err),
+        },
+    }
+}
+
+/// 實際把一個 job 抓下來。回傳（待驗證的檔案、時長、指定的檔名主體）。
+async fn fetch_job(
+    st: &AppState,
+    tools: &tools::Tools,
+    tag: u64,
+    job: &Job,
+    mode: Mode,
+    progress: &mut impl FnMut(u64, u64),
+) -> anyhow::Result<(PathBuf, Option<f64>, Option<String>)> {
+    match job {
+        // yt-dlp 自己會取好檔名，沿用它的
+        Job::Ytdlp { url } => extract::download(tools, url, mode, &st.staging, progress)
+            .await
+            .map(|d| (d.path, d.secs, None)),
+
+        Job::Direct { media, title } => {
+            let ext = ext_of(media);
+            let raw = st.staging.join(format!("{tag}-raw.{ext}"));
+            direct::download(&st.client, media, &raw, progress).await?;
+
+            if mode == Mode::Audio && is_video_container(&ext) {
+                // 影音混合檔要的只是聲音：-c copy 抽出音軌，不重新編碼
+                let m4a = st.staging.join(format!("{tag}.m4a"));
+                let extracted = direct::extract_audio(&tools.ffmpeg, &raw, &m4a).await;
+                let _ = tokio::fs::remove_file(&raw).await;
+                extracted?;
+                Ok((m4a, None, Some(title.clone())))
+            } else {
+                Ok((raw, None, Some(title.clone())))
+            }
         }
+    }
+}
+
+/// 一筆輸入 → 決定怎麼抓 → 單項或整份清單各自排隊
+async fn handle_input(app: AppHandle, st: Arc<AppState>, input: String, mode: Mode) {
+    let kind = if mode == Mode::Audio {
+        "audio"
+    } else {
+        "video"
+    };
+    let probe_item = st.push(input.clone(), short(&input), kind);
+    let _ = app.emit("item", probe_item.clone());
+    let id = probe_item.id;
+
+    update(&app, &st, id, |i| i.status = "resolving".into());
+
+    let tools = match tools_ready(&app, &st).await {
+        Ok(t) => t,
+        Err(e) => return fail(&app, &st, id, format!("準備下載工具失敗：{e}")),
     };
 
-    // 第一首沿用這張卡，其餘各開一張，避免清單頁多出一張空卡
-    let mut assigned: Vec<(u64, String)> = Vec::new();
-    for (n, id) in ids.into_iter().enumerate() {
-        if !st.seen.lock().unwrap().insert(id.clone()) {
-            continue; // 這首排過了
-        }
-        if n == 0 {
-            update(&app, &st, probe.id, |i| i.title = short(&id));
-            assigned.push((probe.id, id));
-        } else {
-            let it = st.push(song::page_url(&id), short(&id));
-            let _ = app.emit("item", it.clone());
-            assigned.push((it.id, id));
-        }
-    }
+    let resolution = match resolve(&tools, &st.client, &input).await {
+        Ok(r) => r,
+        Err(e) => return fail(&app, &st, id, e.to_string()),
+    };
 
-    if assigned.is_empty() {
-        update(&app, &st, probe.id, |i| {
+    let already_queued = |app: &AppHandle, st: &AppState, id: u64| {
+        update(app, st, id, |i| {
             i.status = "done".into();
-            i.title = short(&input);
-            i.error = Some("這些歌都已經在佇列裡了".into());
+            i.error = Some("這個項目已經在佇列裡了".into());
         });
-        return;
+    };
+
+    let mut jobs: Vec<(u64, Job)> = Vec::new();
+    match resolution {
+        Resolution::Single { job, title } => {
+            if !st.seen.lock().unwrap().insert(input.clone()) {
+                return already_queued(&app, &st, id);
+            }
+            update(&app, &st, id, |i| i.title = title);
+            jobs.push((id, job));
+        }
+        Resolution::Playlist { title, items } => {
+            update(&app, &st, id, |i| i.title = format!("{title}（清單）"));
+            let mut first = true;
+            for (job, label) in items {
+                let key = match &job {
+                    Job::Ytdlp { url } => url.clone(),
+                    Job::Direct { media, .. } => media.clone(),
+                };
+                if !st.seen.lock().unwrap().insert(key.clone()) {
+                    continue;
+                }
+                if first {
+                    first = false;
+                    update(&app, &st, id, |i| i.title = label);
+                    jobs.push((id, job));
+                } else {
+                    let it = st.push(key, label, kind);
+                    let _ = app.emit("item", it.clone());
+                    jobs.push((it.id, job));
+                }
+            }
+            if jobs.is_empty() {
+                return update(&app, &st, id, |i| {
+                    i.status = "done".into();
+                    i.error = Some("這份清單裡的項目都已經排過了".into());
+                });
+            }
+        }
     }
 
-    for (item_id, song_id) in assigned {
+    for (item_id, job) in jobs {
         let app2 = app.clone();
         let st2 = st.clone();
-        tauri::async_runtime::spawn(async move { run_song(app2, st2, item_id, song_id).await });
+        let tools2 = tools.clone();
+        tauri::async_runtime::spawn(async move {
+            run_item(app2, st2, tools2, item_id, job, mode).await;
+        });
     }
 }
 
-fn short(s: &str) -> String {
-    let t = s.rsplit('/').next().unwrap_or(s);
-    t.chars().take(20).collect()
+/// 影音容器：在「只要聲音」模式下需要多抽一道音軌
+fn is_video_container(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "mp4" | "webm" | "mkv" | "mov" | "avi" | "flv" | "ts"
+    )
 }
 
-async fn run_song(app: AppHandle, st: Arc<AppState>, id: u64, song_id: String) {
-    // 1. 抓歌名（抓不到就用 id，不算失敗）
-    update(&app, &st, id, |i| i.status = "resolving".into());
-    let title = song::fetch_title(&st.client, &song_id)
-        .await
-        .unwrap_or_else(|| song_id.clone());
-    update(&app, &st, id, |i| i.title = title.clone());
+fn ext_of(url: &str) -> String {
+    url.split('?')
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .and_then(|f| f.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()))
+        .filter(|e| e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| "bin".into())
+}
 
-    // 2. 下載（限流）
+async fn run_item(
+    app: AppHandle,
+    st: Arc<AppState>,
+    tools: tools::Tools,
+    id: u64,
+    job: Job,
+    mode: Mode,
+) {
+    // 1. 下載（限流）
     let permit = match st.dl.acquire().await {
         Ok(p) => p,
         Err(_) => return,
     };
     update(&app, &st, id, |i| i.status = "downloading".into());
 
-    let part = st.out_dir.join(format!(".{song_id}.mp3.part"));
-    let url = song::audio_url(&song_id);
-
     let mut last = Instant::now() - PROGRESS_EVERY;
-    let dl = song::download(&st.client, &url, &part, |got, total| {
-        if last.elapsed() >= PROGRESS_EVERY || (total > 0 && got >= total) {
+    let mut progress = |bytes: u64, total: u64| {
+        if last.elapsed() >= PROGRESS_EVERY || (total > 0 && bytes >= total) {
             last = Instant::now();
             update(&app, &st, id, |i| {
-                i.bytes = got;
+                i.bytes = bytes;
                 i.total = total;
             });
         }
-    })
-    .await;
+    };
 
-    drop(permit); // 讓下一首開始下載，驗證走另一條隊
+    let outcome = fetch_job(&st, &tools, id, &job, mode, &mut progress).await;
 
-    if let Err(e) = dl {
-        let _ = tokio::fs::remove_file(&part).await;
-        update(&app, &st, id, |i| {
-            i.status = "failed".into();
-            i.error = Some(e.to_string());
-        });
-        return;
-    }
+    drop(permit); // 讓下一個開始下載，驗證走另一條隊
 
-    // 3. 驗證能播（限流，CPU 密集所以丟到 blocking 執行緒）
+    let (staged_path, reported_secs, forced_stem) = match outcome {
+        Ok(v) => v,
+        Err(e) => return fail(&app, &st, id, e.to_string()),
+    };
+    let downloaded = extract::Downloaded {
+        path: staged_path,
+        secs: reported_secs,
+    };
+
+    // 2. 驗證（限流）
     let _vp = match st.vf.acquire().await {
         Ok(p) => p,
         Err(_) => return,
     };
     update(&app, &st, id, |i| i.status = "verifying".into());
 
-    let probe_path = part.clone();
-    let verdict = tokio::task::spawn_blocking(move || verify::verify(&probe_path)).await;
+    let staged = downloaded.path.clone();
 
-    let ok = match verdict {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            let _ = tokio::fs::remove_file(&part).await;
-            update(&app, &st, id, |i| {
-                i.status = "failed".into();
-                i.error = Some(format!("驗證未通過：{e}"));
-            });
-            return;
-        }
-        Err(e) => {
-            update(&app, &st, id, |i| {
-                i.status = "failed".into();
-                i.error = Some(format!("驗證程序異常：{e}"));
-            });
-            return;
-        }
+    // 音訊：symphonia 先試，它不認識的編碼（例如 opus）交給 ffmpeg 裁決
+    let probe_path = staged.clone();
+    let audio = tokio::task::spawn_blocking(move || verify::verify(&probe_path)).await;
+    let secs = match audio {
+        Ok(Ok(v)) => Some(v.secs),
+        Ok(Err(sym_err)) => match verify::verify_audio_with_ffmpeg(&tools.ffmpeg, &staged).await {
+            Ok(()) => downloaded.secs,
+            Err(ff_err) => {
+                let _ = tokio::fs::remove_file(&staged).await;
+                return fail(
+                    &app,
+                    &st,
+                    id,
+                    format!("驗證未通過：{ff_err}（symphonia：{sym_err}）"),
+                );
+            }
+        },
+        Err(e) => return fail(&app, &st, id, format!("驗證程序異常：{e}")),
     };
 
-    // 4. 過關才搬進正式資料夾
-    let dest = unique_path(&st.out_dir, &sanitize(&title), "mp3");
-    if let Err(e) = tokio::fs::rename(&part, &dest).await {
-        update(&app, &st, id, |i| {
-            i.status = "failed".into();
-            i.error = Some(format!("搬移失敗：{e}"));
-        });
-        return;
+    // 影片：抽樣確認畫面解得出來
+    if mode == Mode::Video {
+        let dur = downloaded.secs.or(secs).unwrap_or(0.0);
+        if let Err(e) = verify::verify_video(&tools.ffmpeg, &staged, dur).await {
+            let _ = tokio::fs::remove_file(&staged).await;
+            return fail(&app, &st, id, format!("驗證未通過：{e}"));
+        }
+    }
+
+    // 3. 過關才搬進正式資料夾
+    // 走 yt-dlp 時沿用它取好的檔名；直接抓取沒有檔名，用頁面標題
+    let stem = forced_stem.unwrap_or_else(|| {
+        staged
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled".into())
+    });
+    let ext = staged
+        .extension()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "bin".into());
+    let dest = unique_path(&st.out_dir, &sanitize(&stem), &ext);
+
+    if let Err(e) = tokio::fs::rename(&staged, &dest).await {
+        return fail(&app, &st, id, format!("搬移失敗：{e}"));
     }
 
     let name = dest
@@ -317,7 +559,7 @@ async fn run_song(app: AppHandle, st: Arc<AppState>, id: u64, song_id: String) {
         .unwrap_or_default();
     update(&app, &st, id, |i| {
         i.status = "done".into();
-        i.secs = Some(ok.secs);
+        i.secs = downloaded.secs.or(secs);
         i.file = Some(name);
         i.error = None;
     });
@@ -326,17 +568,25 @@ async fn run_song(app: AppHandle, st: Arc<AppState>, id: u64, song_id: String) {
 // ---------------------------------------------------------------- 指令
 
 #[tauri::command]
-fn add(app: AppHandle, text: String) -> Result<usize, String> {
-    let inputs = song::split_inputs(&text);
+fn add(app: AppHandle, text: String, mode: String) -> Result<usize, String> {
+    let inputs: Vec<String> = text
+        .split(|c: char| c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| s.starts_with("http"))
+        .map(|s| s.trim_end_matches(&[')', ']', ',', '。'][..]).to_string())
+        .collect();
+
     if inputs.is_empty() {
-        return Err("沒看到網址。貼 suno.com/song/… 的連結，一行一個。".into());
+        return Err("沒看到網址。貼上影片或音樂的連結，一行一個。".into());
     }
+
+    let mode = Mode::from_str(&mode);
     let st = state_of(&app);
     let n = inputs.len();
     for input in inputs {
         let app2 = app.clone();
         let st2 = st.clone();
-        tauri::async_runtime::spawn(async move { handle_input(app2, st2, input).await });
+        tauri::async_runtime::spawn(async move { handle_input(app2, st2, input, mode).await });
     }
     Ok(n)
 }
@@ -374,6 +624,14 @@ fn clear_done(state: State<'_, Arc<AppState>>) -> Vec<Item> {
     guard.clone()
 }
 
+/// 讓 yt-dlp 自我更新。各站改版時靠這個跟上，不必等 Haul 重新發布。
+#[tauri::command]
+async fn update_tools(app: AppHandle) -> Result<String, String> {
+    let st = state_of(&app);
+    let tools = tools_ready(&app, &st).await?;
+    tools::update_ytdlp(&tools).await.map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------- 進入點
 
 fn main() {
@@ -381,8 +639,25 @@ fn main() {
         .setup(|app| {
             let out = default_out_dir();
             std::fs::create_dir_all(&out)?;
-            sweep_parts(&out);
-            app.manage(Arc::new(AppState::new(out)?));
+
+            let bin = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| out.clone())
+                .join("bin");
+
+            let state = Arc::new(AppState::new(out, bin)?);
+            std::fs::create_dir_all(&state.staging)?;
+            sweep(&state.staging);
+            app.manage(state);
+
+            // 先把工具備好，使用者貼連結時就不用等
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let st = state_of(&handle);
+                let _ = tools_ready(&handle, &st).await;
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -390,7 +665,8 @@ fn main() {
             snapshot,
             out_dir,
             open_out_dir,
-            clear_done
+            clear_done,
+            update_tools
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 啟動失敗");
@@ -415,7 +691,7 @@ mod tests {
     fn sanitize_escapes_windows_reserved_names() {
         assert_eq!(sanitize("NUL"), "_NUL");
         assert_eq!(sanitize("con"), "_con");
-        assert_eq!(sanitize("COM1.mp3"), "_COM1.mp3");
+        assert_eq!(sanitize("COM1.mp4"), "_COM1.mp4");
         assert_eq!(sanitize("CONCERT"), "CONCERT"); // 只有完全相同才算保留字
     }
 
@@ -433,24 +709,97 @@ mod tests {
         assert_eq!(sanitize(""), "untitled");
     }
 
-    #[test]
-    fn parses_song_id_from_url() {
-        let id = "0b5ca1de-1234-4abc-89ef-0123456789ab";
-        assert_eq!(
-            song::song_id_from_input(&format!("https://suno.com/song/{id}")).as_deref(),
-            Some(id)
+    /// 端對端：取得工具 → 解析 → 下載 → 驗證。
+    ///
+    /// 需要網路，設 HAUL_E2E_URL 才會跑（CI 上不設，所以會跳過）。
+    /// 加設 HAUL_E2E_AUDIO 可改測只要聲音的路徑。
+    ///
+    /// 單元測試證明不了這條鏈路 —— 站點的實際行為只有真的打過才知道。
+    #[tokio::test]
+    async fn end_to_end_download() {
+        let Ok(url) = std::env::var("HAUL_E2E_URL") else {
+            return;
+        };
+        let audio_only = std::env::var("HAUL_E2E_AUDIO").is_ok();
+        let mode = if audio_only { Mode::Audio } else { Mode::Video };
+
+        let bin = std::env::temp_dir().join("haul-e2e-bin");
+        let out = std::env::temp_dir().join("haul-e2e-out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        let st = AppState::new(out, bin.clone()).unwrap();
+        std::fs::create_dir_all(&st.staging).unwrap();
+
+        let tools = tools::ensure(&st.client, &bin, |t, got, total| {
+            if total > 0 && got == total {
+                eprintln!("  取得 {t}：{} MB", total / 1_048_576);
+            }
+        })
+        .await
+        .expect("取得 yt-dlp / ffmpeg 失敗");
+
+        // 走的是 app 真正用的那條解析路徑，含 yt-dlp 失敗時的直接抓取後備
+        let job = match resolve(&tools, &st.client, &url)
+            .await
+            .expect("解析連結失敗")
+        {
+            Resolution::Single { job, title } => {
+                eprintln!("  單項：{title}");
+                job
+            }
+            Resolution::Playlist { title, mut items } => {
+                eprintln!("  清單：{title}，共 {} 項，只測第一項", items.len());
+                assert!(!items.is_empty(), "清單展開後不該是空的");
+                items.remove(0).0
+            }
+        };
+        eprintln!("  來源：{job:?}");
+
+        let (path, reported, stem) = fetch_job(&st, &tools, 1, &job, mode, &mut |_, _| {})
+            .await
+            .expect("下載失敗");
+        eprintln!(
+            "  檔案：{}\n  時長：{reported:?}  檔名主體：{stem:?}",
+            path.display()
         );
-        assert_eq!(song::song_id_from_input(id).as_deref(), Some(id));
-        assert_eq!(song::song_id_from_input("https://suno.com/explore"), None);
+        assert!(path.exists(), "回報的檔案不存在");
+
+        // 音訊閘門：symphonia 先試，它不認識的編碼退回 ffmpeg
+        let p = path.clone();
+        let decoded = tokio::task::spawn_blocking(move || verify::verify(&p))
+            .await
+            .unwrap();
+        let secs = match decoded {
+            Ok(v) => {
+                eprintln!("  symphonia 通過，長度 {:.1}s", v.secs);
+                Some(v.secs)
+            }
+            Err(e) => {
+                eprintln!("  symphonia 不認得（{e}），改用 ffmpeg");
+                verify::verify_audio_with_ffmpeg(&tools.ffmpeg, &path)
+                    .await
+                    .expect("ffmpeg 音訊驗證也沒過");
+                None
+            }
+        };
+
+        if mode == Mode::Video {
+            // 直接抓取沒有 yt-dlp 回報的時長，退回用 symphonia 解出來的，
+            // 否則取樣點會全部落在第 0 秒，抓不到截斷
+            let dur = reported.or(secs).unwrap_or(0.0);
+            assert!(dur > 0.0, "拿不到時長，影片抽樣會失去意義");
+            verify::verify_video(&tools.ffmpeg, &path, dur)
+                .await
+                .expect("影片抽樣驗證沒過");
+            eprintln!("  影片抽樣通過（時長 {dur:.1}s）");
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn splits_pasted_text_into_inputs() {
-        let text = "https://suno.com/song/aaaaaaaa-1111-4222-8333-444444444444\n\
-                    垃圾字串\n\
-                    https://suno.com/song/bbbbbbbb-1111-4222-8333-444444444444/";
-        let got = song::split_inputs(text);
-        assert_eq!(got.len(), 2);
-        assert!(got[1].ends_with("444444444444"));
+    fn short_takes_the_tail_of_a_url() {
+        assert_eq!(short("https://example.com/watch/abc"), "abc");
+        assert_eq!(short("https://example.com/watch/abc/"), "abc");
     }
 }

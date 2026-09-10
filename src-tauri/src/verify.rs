@@ -147,9 +147,139 @@ pub fn verify(path: &Path) -> Result<Verified> {
     Ok(Verified { secs })
 }
 
+/// 從 ffmpeg 的 volumedetect 輸出裡取出 mean_volume（dB）。
+fn parse_mean_volume(stderr: &str) -> Option<f64> {
+    let at = stderr.find("mean_volume:")? + "mean_volume:".len();
+    let rest = stderr[at..].trim_start();
+    let num: String = rest
+        .chars()
+        .take_while(|c| {
+            c.is_ascii_digit() || *c == '-' || *c == '.' || *c == 'i' || *c == 'n' || *c == 'f'
+        })
+        .collect();
+    if num.contains("inf") {
+        return Some(f64::NEG_INFINITY);
+    }
+    num.parse::<f64>().ok()
+}
+
+/// symphonia 不認識的編碼交給 ffmpeg 裁決。
+///
+/// 只在 symphonia 失敗後才走這裡。symphonia 沒有 opus 解碼器，而 YouTube
+/// 的音訊常常是 webm/opus —— 若不做這層退路，完好的檔案會被判成壞檔，
+/// 那比不檢查還糟。ffmpeg 過得了就代表檔案沒問題。
+pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<()> {
+    // 刻意用預設的 log 等級：-v error 會把 volumedetect 的統計一起壓掉，
+    // 所以這裡改用離開碼判損毀、用 mean_volume 判無聲，不倚賴 stderr 是否為空。
+    let out = tokio::process::Command::new(ffmpeg)
+        .args(["-nostdin", "-i"])
+        .arg(file)
+        .args(["-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|e| anyhow!("執行 ffmpeg 失敗：{e}"))?;
+
+    let msg = String::from_utf8_lossy(&out.stderr);
+
+    if !out.status.success() {
+        let last = msg
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        bail!("ffmpeg 解不開這個音訊：{last}");
+    }
+
+    match parse_mean_volume(&msg) {
+        Some(db) if db < SILENCE_DB => bail!("整首無聲（mean_volume {db:.1} dB）"),
+        // 取不到就不判定 —— 寧可漏一個無聲檔，也不要誤殺好檔
+        _ => Ok(()),
+    }
+}
+
+/// 影片要抽樣的時間點。開頭附近、中間、接近結尾——
+/// 截斷的檔案一定會在最後那個點爆掉。
+fn sample_points(secs: f64) -> Vec<f64> {
+    if !secs.is_finite() || secs <= 0.0 {
+        return vec![0.0];
+    }
+    if secs < 5.0 {
+        return vec![0.0];
+    }
+    vec![secs * 0.02, secs * 0.5, secs * 0.92]
+}
+
+/// 影片抽樣驗證：確認有視訊軌，且在幾個時間點都解得出畫面。
+///
+/// 完整解一部 1080p 影片要花掉幾十秒 CPU，抽樣把成本壓到一秒內，
+/// 又足以抓到截斷與中段損毀。判斷只看離開碼與 stderr 是否為空，
+/// 不去解析 ffmpeg 的人類可讀輸出（那個格式會隨版本改）。
+pub async fn verify_video(ffmpeg: &Path, file: &Path, secs: f64) -> Result<()> {
+    for t in sample_points(secs) {
+        let out = tokio::process::Command::new(ffmpeg)
+            .args(["-v", "error", "-nostdin", "-ss", &format!("{t:.2}"), "-i"])
+            .arg(file)
+            // -map 0:v:0 在沒有視訊軌時會直接失敗，正好也當成「有沒有畫面」的檢查
+            .args(["-map", "0:v:0", "-frames:v", "8", "-an", "-f", "null", "-"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .map_err(|e| anyhow!("執行 ffmpeg 失敗：{e}"))?;
+
+        if !out.status.success() {
+            let msg = String::from_utf8_lossy(&out.stderr);
+            let first = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            bail!("第 {t:.0} 秒解不出畫面：{first}");
+        }
+        let msg = String::from_utf8_lossy(&out.stderr);
+        if !msg.trim().is_empty() {
+            let first = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            bail!("第 {t:.0} 秒畫面有問題：{first}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_mean_volume_from_ffmpeg_output() {
+        let s = "[Parsed_volumedetect_0 @ 0x7f] n_samples: 123\n\
+                 [Parsed_volumedetect_0 @ 0x7f] mean_volume: -18.4 dB\n\
+                 [Parsed_volumedetect_0 @ 0x7f] max_volume: -0.9 dB";
+        assert_eq!(parse_mean_volume(s), Some(-18.4));
+    }
+
+    #[test]
+    fn parses_digital_silence_as_negative_infinity() {
+        let s = "[Parsed_volumedetect_0 @ 0x7f] mean_volume: -inf dB";
+        assert_eq!(parse_mean_volume(s), Some(f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn missing_mean_volume_is_none_not_zero() {
+        // 取不到要回 None（不判定），回 Some(0.0) 會變成「很大聲」的誤判
+        assert_eq!(parse_mean_volume("nothing useful here"), None);
+    }
+
+    #[test]
+    fn sample_points_cover_start_middle_end() {
+        let p = sample_points(200.0);
+        assert_eq!(p.len(), 3);
+        assert!(p[0] < 10.0, "第一個點要靠近開頭");
+        assert!(p[2] > 180.0, "最後一個點要夠接近結尾才抓得到截斷");
+    }
+
+    #[test]
+    fn sample_points_handle_short_and_bogus_durations() {
+        assert_eq!(sample_points(2.0), vec![0.0]);
+        assert_eq!(sample_points(0.0), vec![0.0]);
+        assert_eq!(sample_points(f64::NAN), vec![0.0]);
+    }
 
     #[test]
     fn rejects_non_audio() {

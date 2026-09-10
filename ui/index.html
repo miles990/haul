@@ -86,8 +86,62 @@
   }
 
   .hint {
+    margin: 8px 2px 0;
     font-size: 11.5px;
     color: var(--dim);
+  }
+
+  .hint.bad { color: var(--fail); }
+
+  /* 影片 / 只要聲音 —— 分段切換，安靜地待在輸入欄底部 */
+  .modes {
+    display: flex;
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .mode {
+    border: 0;
+    border-radius: 0;
+    padding: 4px 11px;
+    background: none;
+    color: var(--dim);
+    font: 500 12px/1 var(--sans);
+  }
+
+  .mode + .mode { border-left: 1px solid var(--edge); }
+  .mode:hover:not(.on) { background: #2b3138; color: var(--ink); }
+  .mode.on { background: #3a2d14; color: var(--lamp); }
+
+  /* 首次啟動抓 yt-dlp 與 ffmpeg 時的進度 */
+  #setup {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 18px 11px;
+    border-bottom: 1px solid var(--edge);
+    background: var(--panel);
+    font-size: 12px;
+    color: var(--dim);
+  }
+
+  #setup .meter {
+    flex: 1;
+    min-width: 60px;
+    height: 5px;
+    background: var(--sunk);
+    border-radius: 1px;
+    overflow: hidden;
+  }
+
+  #setup .meter > i {
+    display: block;
+    width: 0;
+    height: 100%;
+    background: repeating-linear-gradient(90deg,
+      var(--lamp) 0 3px, transparent 3px 5px);
+    transition: width 0.2s linear;
   }
 
   button {
@@ -247,13 +301,22 @@
 <section class="intake">
   <div class="field" id="field">
     <textarea id="input" spellcheck="false"
-      placeholder="貼上 Suno 連結，一行一個"></textarea>
+      placeholder="貼上影片或音樂的連結，一行一個"></textarea>
     <div class="row-actions">
-      <span class="hint">單曲或清單都可以</span>
+      <div class="modes" role="radiogroup" aria-label="要下載什麼">
+        <button type="button" class="mode on" data-mode="video" role="radio" aria-checked="true">影片</button>
+        <button type="button" class="mode" data-mode="audio" role="radio" aria-checked="false">只要聲音</button>
+      </div>
       <button class="primary" id="go">加入佇列</button>
     </div>
   </div>
+  <p class="hint" id="hint">單支或整份清單都可以</p>
 </section>
+
+<div id="setup" hidden>
+  <span id="setup-text">正在準備下載工具…</span>
+  <div class="meter"><i id="setup-fill"></i></div>
+</div>
 
 <div id="queue">
   <p class="empty" id="empty">佇列是空的。貼上連結就會開始下載。</p>
@@ -262,6 +325,7 @@
 <footer>
   <span id="dest">—</span>
   <span id="tally"></span>
+  <button id="update" title="各站改版時靠這個跟上">更新 yt-dlp</button>
   <button id="reveal">開啟資料夾</button>
   <button id="clear">清掉已完成</button>
 </footer>
@@ -377,22 +441,40 @@
     updateTally();
   }
 
+  const hint = document.getElementById('hint');
+  const HINT_DEFAULT = '單支或整份清單都可以';
+  let mode = 'video';
+
+  for (const b of document.querySelectorAll('.mode')) {
+    b.addEventListener('click', () => {
+      mode = b.dataset.mode;
+      for (const other of document.querySelectorAll('.mode')) {
+        const on = other === b;
+        other.classList.toggle('on', on);
+        other.setAttribute('aria-checked', String(on));
+      }
+    });
+  }
+
+  function say(msg, bad) {
+    hint.textContent = msg;
+    hint.classList.toggle('bad', !!bad);
+    if (msg !== HINT_DEFAULT) {
+      clearTimeout(say.t);
+      say.t = setTimeout(() => say(HINT_DEFAULT, false), 5000);
+    }
+  }
+
   async function submit() {
     const text = input.value.trim();
     if (!text) { input.focus(); return; }
     go.disabled = true;
     try {
-      await invoke('add', { text });
+      await invoke('add', { text, mode });
       input.value = '';
     } catch (e) {
-      // 後端把「看不懂輸入」當成錯誤回來，直接顯示在提示位置
-      const hint = document.querySelector('.hint');
-      hint.textContent = String(e);
-      hint.style.color = 'var(--fail)';
-      setTimeout(() => {
-        hint.textContent = '單曲或清單都可以';
-        hint.style.color = '';
-      }, 4000);
+      // 後端把「看不懂輸入」當成錯誤回來，顯示在提示位置
+      say(String(e), true);
     } finally {
       go.disabled = false;
       input.focus();
@@ -424,6 +506,39 @@
   });
 
   listen('item', e => paint(e.payload));
+
+  // 首次啟動要抓 yt-dlp 與 ffmpeg（約 80MB），把進度顯示出來，
+  // 不然使用者只會看到一個沒反應的視窗
+  const setup = document.getElementById('setup');
+  const setupText = document.getElementById('setup-text');
+  const setupFill = document.getElementById('setup-fill');
+
+  listen('setup', e => {
+    const s = e.payload;
+    if (s.stage === 'done') { setup.hidden = true; return; }
+    setup.hidden = false;
+    if (s.stage === 'failed') {
+      setupText.textContent = '準備工具失敗：' + (s.error || '原因不明');
+      setupFill.style.width = '0';
+      return;
+    }
+    const mbTotal = s.total ? ` ${mb(s.bytes)} / ${mb(s.total)}` : '';
+    setupText.textContent = `首次啟動，正在取得 ${s.tool}${mbTotal}`;
+    setupFill.style.width = s.total ? (s.bytes / s.total) * 100 + '%' : '0';
+  });
+
+  document.getElementById('update').addEventListener('click', async (ev) => {
+    ev.target.disabled = true;
+    say('正在更新 yt-dlp…', false);
+    try {
+      const out = await invoke('update_tools');
+      say(out || 'yt-dlp 已是最新版', false);
+    } catch (e) {
+      say('更新失敗：' + String(e), true);
+    } finally {
+      ev.target.disabled = false;
+    }
+  });
 
   (async () => {
     document.getElementById('dest').textContent = await invoke('out_dir');
