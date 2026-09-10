@@ -17,8 +17,23 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 
-pub const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
-                      (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+/// 誠實表明身分的預設 UA。
+///
+/// 實測（Wikimedia Commons，同一個網址只換 UA）：
+///   Chrome 字串 -> 429、空 UA -> 429、`Haul/x (+網址)` -> 206
+/// 不少站點對「假裝成瀏覽器的腳本」擋得比對誠實的 bot 兇得多，
+/// 因為那正是濫用者的特徵。先前整批圖庫失敗的真正原因就是這個，
+/// 不是請求速率。
+pub const UA: &str = concat!(
+    "Haul/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/miles990/haul)"
+);
+
+/// 反向的壓力也存在：有些站會擋掉不認識的 UA。被 403/429 擋下時退而
+/// 求其次用這個再試一次。誠實優先，但不至於因此抓不到東西。
+pub const UA_BROWSER: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+                              (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /// 對同一個主機兩次請求之間至少隔這麼久。
 ///
@@ -137,10 +152,14 @@ fn retry_delay(res: &reqwest::Response, attempt: u32) -> Duration {
 }
 
 async fn head_ok(client: &Client, url: &str) -> bool {
-    match client.head(url).header("user-agent", UA).send().await {
-        Ok(r) => r.status().is_success(),
-        Err(_) => false,
+    for ua in [UA, UA_BROWSER] {
+        if let Ok(r) = client.head(url).header("user-agent", ua).send().await {
+            if r.status().is_success() {
+                return true;
+            }
+        }
     }
+    false
 }
 
 /// Suno 的歌曲頁。曾經是 `<uuid>.mp3`，現在是 `<uuid>.mp4`（h264 + aac），
@@ -333,27 +352,39 @@ where
 {
     let host = host_of(media_url);
     let mut res = None;
+    let mut ua = UA;
+    let mut swapped_ua = false;
 
     for attempt in 1..=MAX_ATTEMPTS {
         wait_turn(&host).await;
         let r = client
             .get(media_url)
-            .header("user-agent", UA)
+            .header("user-agent", ua)
             .send()
             .await?;
         let status = r.status();
+        let code = status.as_u16();
 
-        // 被限流時退讓再試，而不是直接判失敗
-        if status.as_u16() == 429 || status.as_u16() == 503 {
+        // 403/429 可能是 UA 被擋而不是真的限流。先換一次 UA 再試，
+        // 這比一路退避有效得多 —— 實測 Wikimedia 對 Chrome 字串一律回 429，
+        // 換成誠實的 bot UA 立刻 206。
+        if (code == 403 || code == 429) && !swapped_ua {
+            swapped_ua = true;
+            ua = if ua == UA { UA_BROWSER } else { UA };
+            continue;
+        }
+
+        // 真的被限流時退讓再試，而不是直接判失敗
+        if code == 429 || code == 503 {
             if attempt == MAX_ATTEMPTS {
-                bail!("HTTP {status}（退讓重試 {MAX_ATTEMPTS} 次後仍被限流）");
+                bail!("HTTP {status}（換過 UA、退讓重試 {MAX_ATTEMPTS} 次後仍被限流）");
             }
             tokio::time::sleep(retry_delay(&r, attempt)).await;
             continue;
         }
 
         if !status.is_success() {
-            let hint = match status.as_u16() {
+            let hint = match code {
                 401 | 403 => "（可能是私人的或連結已失效）",
                 404 => "（找不到這個檔案）",
                 _ => "",
