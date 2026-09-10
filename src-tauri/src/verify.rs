@@ -6,7 +6,7 @@
 use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -45,17 +45,28 @@ pub fn verify(path: &Path) -> Result<Verified> {
         .map_err(|e| anyhow!("認不出音訊格式：{e}"))?;
     let mut format = probed.format;
 
-    let track = format
-        .default_track()
-        .ok_or_else(|| anyhow!("檔案裡沒有音訊軌"))?;
-    let track_id = track.id;
-    let sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    // 影音混合的 mp4 裡第 0 軌通常是視訊，default_track() 會挑到它。
+    // 這裡明確找第一個帶取樣率的可解碼音訊軌。
+    let (track_id, sample_rate, params) = {
+        let t = format
+            .tracks()
+            .iter()
+            .find(|t| {
+                t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some()
+            })
+            .ok_or_else(|| anyhow!("檔案裡沒有可解碼的音訊軌"))?;
+        (
+            t.id,
+            t.codec_params.sample_rate.unwrap_or(0),
+            t.codec_params.clone(),
+        )
+    };
     if sample_rate == 0 {
         bail!("取樣率不明");
     }
 
     let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+        .make(&params, &DecoderOptions::default())
         .map_err(|e| anyhow!("沒有對應的解碼器：{e}"))?;
 
     let mut frames: u64 = 0;
