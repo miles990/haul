@@ -8,7 +8,7 @@
 
 use haul_core::{
     default_bin_dir, default_out_dir, open_with_system, validate_playable, Config, Engine, Event,
-    Item, Mode,
+    Item, Mode, Options,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ fn engine(app: &AppHandle) -> Arc<Engine> {
 }
 
 #[tauri::command]
-fn add(app: AppHandle, text: String, mode: String) -> Result<usize, String> {
+fn add(app: AppHandle, text: String, mode: String, quality: Option<u32>) -> Result<usize, String> {
     let inputs: Vec<String> = text
         .split(|c: char| c.is_whitespace())
         .map(str::trim)
@@ -45,12 +45,15 @@ fn add(app: AppHandle, text: String, mode: String) -> Result<usize, String> {
     }
 
     let mode = Mode::parse(&mode);
+    let opts = Options {
+        max_height: quality,
+    };
     let eng = engine(&app);
     let n = inputs.len();
     for input in inputs {
         let e = eng.clone();
         tauri::async_runtime::spawn(async move {
-            e.add(input, mode).await;
+            e.add(input, mode, opts).await;
         });
     }
     Ok(n)

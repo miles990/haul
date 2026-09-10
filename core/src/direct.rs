@@ -11,17 +11,31 @@ use anyhow::{bail, Result};
 use futures_util::StreamExt;
 use regex::Regex;
 use reqwest::Client;
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 
 pub const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
                       (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/// 對同一個主機兩次請求之間至少隔這麼久。
+///
+/// 之所以需要：整批圖庫是對同一台主機連發幾百個請求。原本只有「同時 3 個
+/// 下載」的限制，對三支大影片夠用，但對 223 張小圖就直接被回 429 —— 實測
+/// 223 張只成功 4 張。下載器與爬蟲的差別正在這裡。
+const MIN_HOST_INTERVAL: Duration = Duration::from_millis(300);
+
+/// 被限流時重試幾次
+const MAX_ATTEMPTS: u32 = 4;
+
 #[derive(Debug, Clone)]
 pub struct Found {
     pub media: String,
     pub title: String,
+    /// 伺服器回報的 Content-Type。比副檔名可靠，用來決定驗證強度。
+    pub content_type: Option<String>,
 }
 
 fn uuid_re() -> &'static Regex {
@@ -82,6 +96,46 @@ pub fn looks_like_media_url(url: &str) -> bool {
     )
 }
 
+fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .and_then(|r| r.split('/').next())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// 排隊等這個主機的下一個空檔。時間戳是先佔的，所以併發的任務會
+/// 自動錯開而不是同時衝出去。
+async fn wait_turn(host: &str) {
+    static GATE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let gate = GATE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let wait = {
+        let mut m = gate.lock().unwrap();
+        let now = Instant::now();
+        let slot = m
+            .get(host)
+            .map(|t| (*t + MIN_HOST_INTERVAL).max(now))
+            .unwrap_or(now);
+        m.insert(host.to_string(), slot);
+        slot.saturating_duration_since(now)
+    };
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// 伺服器說要等多久就等多久，沒說就用指數退避
+fn retry_delay(res: &reqwest::Response, attempt: u32) -> Duration {
+    res.headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_millis(500 * 2u64.pow(attempt.min(5))))
+        .min(Duration::from_secs(30))
+}
+
 async fn head_ok(client: &Client, url: &str) -> bool {
     match client.head(url).header("user-agent", UA).send().await {
         Ok(r) => r.status().is_success(),
@@ -122,12 +176,16 @@ async fn suno(client: &Client, page_url: &str) -> Result<Found> {
         Err(_) => id.clone(),
     };
 
-    Ok(Found { media, title })
+    Ok(Found {
+        media,
+        title,
+        content_type: None,
+    })
 }
 
 /// 試著在不靠 yt-dlp 的情況下找出媒體檔。找不到就回 Err，呼叫端據此
 /// 決定要回報哪個錯誤。
-pub async fn probe(client: &Client, url: &str) -> Result<Found> {
+pub async fn probe(client: &Client, url: &str, allow_html: bool) -> Result<Found> {
     if looks_like_media_url(url) {
         let title = url
             .split('?')
@@ -141,6 +199,7 @@ pub async fn probe(client: &Client, url: &str) -> Result<Found> {
         return Ok(Found {
             media: url.to_string(),
             title,
+            content_type: None,
         });
     }
 
@@ -155,7 +214,110 @@ pub async fn probe(client: &Client, url: &str) -> Result<Found> {
         return suno(client, url).await;
     }
 
-    bail!("沒有對應的直接抓取規則")
+    any_file(client, url, allow_html).await
+}
+
+/// 通用檔案：問伺服器這是什麼，再決定要不要當成可下載的檔案。
+///
+/// text/html 預設不算檔案。理由是假成功比失敗更糟：如果 yt-dlp 對某個
+/// 影片連結暫時失敗，然後我們「成功」存下那頁 HTML，使用者會以為抓到了。
+/// 真的想存網頁本身就明確加 --any。
+async fn any_file(client: &Client, url: &str, allow_html: bool) -> Result<Found> {
+    let res = client
+        .head(url)
+        .header("user-agent", UA)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("連不上：{e}"))?;
+
+    if !res.status().is_success() {
+        bail!("HTTP {}", res.status());
+    }
+
+    let headers = res.headers();
+    let ct = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let is_html = ct
+        .as_deref()
+        .map(|t| {
+            t.split(';')
+                .next()
+                .unwrap_or(t)
+                .trim()
+                .eq_ignore_ascii_case("text/html")
+        })
+        .unwrap_or(false);
+
+    if is_html && !allow_html {
+        bail!("這是一個網頁不是檔案。要存下網頁本身請加 --any");
+    }
+
+    // 檔名優先順序：Content-Disposition > 網址最後一段 > 主機名
+    let title = headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .and_then(filename_from_disposition)
+        .or_else(|| {
+            url.split('?')
+                .next()
+                .unwrap_or(url)
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .map(str::to_string)
+                .filter(|s| !s.is_empty() && s.contains('.'))
+        })
+        .unwrap_or_else(|| {
+            url.split("://")
+                .nth(1)
+                .and_then(|r| r.split('/').next())
+                .unwrap_or("download")
+                .to_string()
+        });
+
+    Ok(Found {
+        media: url.to_string(),
+        title,
+        content_type: ct,
+    })
+}
+
+/// 從 Content-Disposition 取檔名。優先 filename*（RFC 5987，帶編碼），
+/// 沒有才用 filename。
+fn filename_from_disposition(v: &str) -> Option<String> {
+    if let Some(i) = v.to_ascii_lowercase().find("filename*=") {
+        let rest = &v[i + "filename*=".len()..];
+        let val = rest.split(';').next()?.trim();
+        // UTF-8''%E4%B8%AD.pdf 這種形式
+        if let Some(enc) = val.split("''").nth(1) {
+            return Some(percent_decode(enc));
+        }
+    }
+    let i = v.to_ascii_lowercase().find("filename=")?;
+    let rest = &v[i + "filename=".len()..];
+    let val = rest.split(';').next()?.trim().trim_matches('"');
+    (!val.is_empty()).then(|| val.to_string())
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// 串流下載到 `dest`，記憶體用量與檔案大小無關。
@@ -163,24 +325,65 @@ pub async fn download<F>(
     client: &Client,
     media_url: &str,
     dest: &Path,
+    allow_html: bool,
     mut on_progress: F,
 ) -> Result<u64>
 where
     F: FnMut(u64, u64),
 {
-    let res = client
-        .get(media_url)
-        .header("user-agent", UA)
-        .send()
-        .await?;
-    let status = res.status();
-    if !status.is_success() {
-        let hint = match status.as_u16() {
-            401 | 403 => "（可能是私人的或連結已失效）",
-            404 => "（找不到這個檔案）",
-            _ => "",
-        };
-        bail!("HTTP {status}{hint}");
+    let host = host_of(media_url);
+    let mut res = None;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        wait_turn(&host).await;
+        let r = client
+            .get(media_url)
+            .header("user-agent", UA)
+            .send()
+            .await?;
+        let status = r.status();
+
+        // 被限流時退讓再試，而不是直接判失敗
+        if status.as_u16() == 429 || status.as_u16() == 503 {
+            if attempt == MAX_ATTEMPTS {
+                bail!("HTTP {status}（退讓重試 {MAX_ATTEMPTS} 次後仍被限流）");
+            }
+            tokio::time::sleep(retry_delay(&r, attempt)).await;
+            continue;
+        }
+
+        if !status.is_success() {
+            let hint = match status.as_u16() {
+                401 | 403 => "（可能是私人的或連結已失效）",
+                404 => "（找不到這個檔案）",
+                _ => "",
+            };
+            bail!("HTTP {status}{hint}");
+        }
+        res = Some(r);
+        break;
+    }
+
+    let res = res.ok_or_else(|| anyhow::anyhow!("重試後仍拿不到回應"))?;
+
+    // HEAD 與 GET 的 Content-Type 可能不同，所以這裡再擋一次。
+    // 存下一個 HTML 錯誤頁卻報成功，比失敗更糟。
+    if !allow_html {
+        let is_html = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|t| {
+                t.split(';')
+                    .next()
+                    .unwrap_or(t)
+                    .trim()
+                    .eq_ignore_ascii_case("text/html")
+            })
+            .unwrap_or(false);
+        if is_html {
+            bail!("伺服器回的是網頁不是檔案（要存網頁請加 --any）");
+        }
     }
 
     let total = res.content_length().unwrap_or(0);
@@ -231,6 +434,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extracts_host_for_rate_limiting() {
+        assert_eq!(
+            host_of("https://Upload.Wikimedia.org/a/b.jpg"),
+            "upload.wikimedia.org"
+        );
+        assert_eq!(host_of("http://x.com"), "x.com");
+        assert_eq!(host_of("not a url"), "");
+    }
+
+    #[test]
     fn recognises_bare_media_urls() {
         assert!(looks_like_media_url("https://x.com/a/b.mp4"));
         assert!(looks_like_media_url("https://x.com/a/b.MP3?token=1"));
@@ -243,9 +456,28 @@ mod tests {
         assert_eq!(decode_entities("A &amp; B &#39;C&#39;"), "A & B 'C'");
     }
 
-    #[tokio::test]
-    async fn refuses_hosts_without_a_rule() {
-        let c = Client::new();
-        assert!(probe(&c, "https://example.com/watch/abc").await.is_err());
+    #[test]
+    fn reads_filename_from_content_disposition() {
+        assert_eq!(
+            filename_from_disposition(r#"attachment; filename="report.pdf""#).as_deref(),
+            Some("report.pdf")
+        );
+        // filename* 帶編碼，且優先於 filename
+        assert_eq!(
+            filename_from_disposition(
+                "attachment; filename=\"fallback.pdf\"; filename*=UTF-8''%E5%A0%B1%E5%91%8A.pdf"
+            )
+            .as_deref(),
+            Some("報告.pdf")
+        );
+        assert_eq!(filename_from_disposition("inline").as_deref(), None);
+    }
+
+    #[test]
+    fn percent_decoding_survives_malformed_input() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        // 壞掉的跳脫序列原樣保留，不該 panic
+        assert_eq!(percent_decode("a%zzb"), "a%zzb");
+        assert_eq!(percent_decode("a%"), "a%");
     }
 }

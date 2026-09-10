@@ -27,16 +27,34 @@ pub enum Mode {
     Video,
     /// 只要聲音：抽出原始音軌，能直接複製就不重新編碼
     Audio,
+    /// 只要封面圖／縮圖
+    Image,
 }
 
 impl Mode {
     pub fn parse(s: &str) -> Self {
-        if s == "audio" {
-            Mode::Audio
-        } else {
-            Mode::Video
+        match s {
+            "audio" => Mode::Audio,
+            "image" => Mode::Image,
+            // 認不得就當影片，不要因為前端傳錯字就整個壞掉
+            _ => Mode::Video,
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Video => "video",
+            Mode::Audio => "audio",
+            Mode::Image => "image",
+        }
+    }
+}
+
+/// 下載選項。放成結構是為了之後加東西不用一直改函式簽章。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    /// 畫質上限（像素高度）。None 表示不設限。
+    pub max_height: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -141,6 +159,7 @@ pub async fn download<F>(
     tools: &Tools,
     url: &str,
     mode: Mode,
+    opts: Options,
     staging: &Path,
     mut on_progress: F,
 ) -> Result<Downloaded>
@@ -173,10 +192,20 @@ where
         .arg(format!("home:{}", staging.display()));
 
     match mode {
-        // bv*+ba 拿分離的最佳視訊與音訊再合併，b 是已經合併好的後備
-        Mode::Video => cmd.args(["-f", "bv*+ba/b", "--merge-output-format", "mp4"]),
+        // bv*+ba 拿分離的最佳視訊與音訊再合併，b 是已經合併好的後備。
+        // 帶上限時把「符合上限」排在前面，但仍保留不設限的後備 ——
+        // 沒有任何格式符合上限時，寧可下載得到也不要整個失敗。
+        Mode::Video => {
+            let f = match opts.max_height {
+                Some(h) => format!("bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"),
+                None => "bv*+ba/b".to_string(),
+            };
+            cmd.args(["-f", &f]).args(["--merge-output-format", "mp4"])
+        }
         // --audio-format best 表示能直接複製就不要重新編碼
         Mode::Audio => cmd.args(["-f", "ba/b", "-x", "--audio-format", "best"]),
+        // 縮圖走另一條路徑，不會到這裡
+        Mode::Image => cmd.args(["-f", "ba/b"]),
     };
 
     cmd.arg(url)
@@ -267,6 +296,54 @@ where
     Ok(Downloaded { path, secs })
 }
 
+/// 只抓封面圖／縮圖。
+///
+/// `--skip-download` 時 yt-dlp 的 `--print after_move:` 完全不輸出（實測確認），
+/// 所以不能靠它拿路徑。改成每個項目給一個獨立的空目錄，跑完取裡面唯一的
+/// 檔案——目錄是獨占的，「那個檔案」就毫無歧義。
+pub async fn download_thumbnail(tools: &Tools, url: &str, dir: &Path) -> Result<PathBuf> {
+    tokio::fs::create_dir_all(dir).await?;
+
+    let mut cmd = Command::new(&tools.ytdlp);
+    base_args(&mut cmd);
+    cmd.args([
+        "--skip-download",
+        "--write-thumbnail",
+        "--convert-thumbnails",
+        "jpg",
+        "--windows-filenames",
+        "--trim-filenames",
+        "150",
+        "-o",
+        "%(title)s.%(ext)s",
+    ]);
+    cmd.arg("--ffmpeg-location").arg(&tools.ffmpeg);
+    cmd.arg("--paths").arg(format!("home:{}", dir.display()));
+    cmd.arg(url).stdin(Stdio::null());
+
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| anyhow!("執行 yt-dlp 失敗：{e}"))?;
+
+    if !out.status.success() {
+        let lines: Vec<String> = String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        bail!("{}", stderr_tail(&lines));
+    }
+
+    let mut rd = tokio::fs::read_dir(dir).await?;
+    while let Some(e) = rd.next_entry().await? {
+        let p = e.path();
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    bail!("這個來源沒有可用的封面圖")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,7 +353,22 @@ mod tests {
         assert_eq!(Mode::parse("audio"), Mode::Audio);
         assert_eq!(Mode::parse("video"), Mode::Video);
         // 認不得的一律當影片，不要因為前端傳錯字就整個壞掉
+        assert_eq!(Mode::parse("image"), Mode::Image);
         assert_eq!(Mode::parse("nonsense"), Mode::Video);
+    }
+
+    #[test]
+    fn quality_cap_keeps_an_uncapped_fallback() {
+        // 沒有任何格式符合上限時，寧可下載得到也不要整個失敗
+        let opts = Options {
+            max_height: Some(1080),
+        };
+        let f = match opts.max_height {
+            Some(h) => format!("bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"),
+            None => "bv*+ba/b".to_string(),
+        };
+        assert!(f.contains("height<=1080"));
+        assert!(f.ends_with("/bv*+ba/b"), "後備必須是不設限的：{f}");
     }
 
     #[test]

@@ -199,6 +199,167 @@ pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<()> 
     }
 }
 
+/// 一個檔案通過了哪一級檢查。
+///
+/// 存在的理由是誠實：不同型別能做到的驗證強度天差地遠，把它們都
+/// 報成「成功」會讓呼叫端無從判斷到底檢查了多少。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Level {
+    /// 解碼過的音訊或影片
+    Media,
+    /// 解碼過的圖片
+    Image,
+    /// 真的 parse 過的 JSON
+    Json,
+    /// 容器結構完整（PDF / ZIP 的 magic 與結尾簽章）
+    Archive,
+    /// 合法 UTF-8 且非空
+    Text,
+    /// 只確認位元組數與 Content-Length 相符
+    Integrity,
+}
+
+impl Level {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Level::Media => "media",
+            Level::Image => "image",
+            Level::Json => "json",
+            Level::Archive => "archive",
+            Level::Text => "text",
+            Level::Integrity => "integrity",
+        }
+    }
+}
+
+/// 依副檔名判斷該用哪一級檢查。呼叫端若有 Content-Type 應優先使用它。
+pub fn level_for(ext: &str) -> Level {
+    match ext.to_ascii_lowercase().as_str() {
+        "mp4" | "m4a" | "mp3" | "webm" | "mkv" | "mov" | "avi" | "flv" | "ts" | "wav" | "flac"
+        | "opus" | "ogg" | "aac" | "m4v" | "wma" => Level::Media,
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "avif" | "heic" => {
+            Level::Image
+        }
+        "json" | "jsonl" | "ndjson" => Level::Json,
+        "pdf" | "zip" | "epub" | "cbz" | "docx" | "xlsx" | "pptx" => Level::Archive,
+        "txt" | "md" | "csv" | "srt" | "vtt" | "ass" | "lrc" | "html" | "htm" | "xml" => {
+            Level::Text
+        }
+        _ => Level::Integrity,
+    }
+}
+
+/// Content-Type 比副檔名可靠，有就用它
+pub fn level_for_content_type(ct: &str) -> Option<Level> {
+    let ct = ct
+        .split(';')
+        .next()
+        .unwrap_or(ct)
+        .trim()
+        .to_ascii_lowercase();
+    Some(match ct.as_str() {
+        t if t.starts_with("audio/") || t.starts_with("video/") => Level::Media,
+        t if t.starts_with("image/") => Level::Image,
+        "application/json" | "application/x-ndjson" => Level::Json,
+        "application/pdf" | "application/zip" | "application/epub+zip" => Level::Archive,
+        t if t.starts_with("text/") => Level::Text,
+        _ => return None,
+    })
+}
+
+/// 圖片：交給 ffmpeg 解一張出來。已經有這支工具，不必為此多背一個影像函式庫。
+pub async fn verify_image(ffmpeg: &Path, file: &Path) -> Result<()> {
+    let out = tokio::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(file)
+        .args(["-frames:v", "1", "-f", "null", "-"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|e| anyhow!("執行 ffmpeg 失敗：{e}"))?;
+
+    let msg = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        let first = decode_complaints(&msg)
+            .first()
+            .copied()
+            .unwrap_or("ffmpeg 未說明原因");
+        bail!("這不是一張解得開的圖片：{first}");
+    }
+    if let Some(first) = decode_complaints(&msg).first() {
+        bail!("圖片有問題：{first}");
+    }
+    Ok(())
+}
+
+/// JSON：真的 parse 一遍。這比「非空」強得多——半截的回應會被抓出來。
+pub fn verify_json(file: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(file).map_err(|e| anyhow!("讀不到檔案：{e}"))?;
+    if text.trim().is_empty() {
+        bail!("檔案是空的");
+    }
+    // NDJSON 每行各自是一份 JSON，整份 parse 會失敗，所以兩種都試
+    if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
+        return Ok(());
+    }
+    let mut lines = 0;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        serde_json::from_str::<serde_json::Value>(line)
+            .map_err(|e| anyhow!("不是合法的 JSON 或 NDJSON：{e}"))?;
+        lines += 1;
+    }
+    if lines == 0 {
+        bail!("沒有任何一行是 JSON");
+    }
+    Ok(())
+}
+
+/// PDF / ZIP：檢查開頭的 magic 與結尾的簽章。
+///
+/// 不為此引進 PDF 或 ZIP 函式庫——這兩個簽章足以抓到截斷，
+/// 而截斷正是下載最常見的損壞方式。
+pub fn verify_archive(file: &Path) -> Result<()> {
+    let bytes = std::fs::read(file).map_err(|e| anyhow!("讀不到檔案：{e}"))?;
+    if bytes.len() < 32 {
+        bail!("檔案只有 {} bytes，不像完整的檔案", bytes.len());
+    }
+    let tail_from = bytes.len().saturating_sub(2048);
+    let tail = &bytes[tail_from..];
+
+    if bytes.starts_with(b"%PDF-") {
+        if !contains(tail, b"%%EOF") {
+            bail!("PDF 結尾缺少 %%EOF，檔案應該是截斷的");
+        }
+        return Ok(());
+    }
+    if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
+        // 中央目錄結尾記錄。沒有它就代表 zip 沒寫完。
+        if !contains(tail, b"PK\x05\x06") {
+            bail!("ZIP 缺少中央目錄結尾記錄，檔案應該是截斷的");
+        }
+        return Ok(());
+    }
+    bail!("開頭的位元組不像 PDF 或 ZIP")
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// 純文字：合法 UTF-8 且非空白。這是文字唯一能保證的東西——
+/// 「內容有沒有意義」不是下載器判斷得了的。
+pub fn verify_text(file: &Path) -> Result<()> {
+    let bytes = std::fs::read(file).map_err(|e| anyhow!("讀不到檔案：{e}"))?;
+    if bytes.is_empty() {
+        bail!("檔案是空的");
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|e| anyhow!("不是合法的 UTF-8：{e}"))?;
+    if text.trim().is_empty() {
+        bail!("檔案只有空白字元");
+    }
+    Ok(())
+}
+
 /// 從 ffmpeg 的 stderr 裡挑出「真正跟解碼有關」的抱怨。
 ///
 /// 用 `-ss` 跳進串流中段時，輸出端的 null muxer 會抗議時間戳重疊
@@ -267,6 +428,89 @@ pub async fn verify_video(ffmpeg: &Path, file: &Path, secs: f64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("haul-verify-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn content_type_wins_over_extension_when_available() {
+        assert_eq!(level_for_content_type("image/png"), Some(Level::Image));
+        assert_eq!(
+            level_for_content_type("application/json; charset=utf-8"),
+            Some(Level::Json)
+        );
+        assert_eq!(level_for_content_type("video/mp4"), Some(Level::Media));
+        // 認不得就交還給呼叫端，由副檔名決定
+        assert_eq!(level_for_content_type("application/octet-stream"), None);
+    }
+
+    #[test]
+    fn extension_maps_to_the_strongest_available_check() {
+        assert_eq!(level_for("mp4"), Level::Media);
+        assert_eq!(level_for("JPG"), Level::Image);
+        assert_eq!(level_for("json"), Level::Json);
+        assert_eq!(level_for("pdf"), Level::Archive);
+        assert_eq!(level_for("txt"), Level::Text);
+        // 不認得的一律只驗完整性，而不是假裝驗過內容
+        assert_eq!(level_for("bin"), Level::Integrity);
+    }
+
+    #[test]
+    fn json_gate_accepts_both_json_and_ndjson() {
+        assert!(verify_json(&tmp("a.json", br#"{"a":1}"#)).is_ok());
+        assert!(verify_json(&tmp("b.jsonl", b"{\"a\":1}\n{\"b\":2}\n")).is_ok());
+    }
+
+    #[test]
+    fn json_gate_catches_truncation() {
+        // 半截的回應是下載最常見的損壞方式，光看「非空」抓不到
+        assert!(verify_json(&tmp("c.json", br#"{"a":1"#)).is_err());
+        assert!(verify_json(&tmp("d.json", b"")).is_err());
+    }
+
+    #[test]
+    fn archive_gate_catches_truncated_pdf_and_zip() {
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        pdf.extend(std::iter::repeat_n(b'x', 100));
+        assert!(
+            verify_archive(&tmp("truncated.pdf", &pdf)).is_err(),
+            "缺少 %%EOF 應該判定為截斷"
+        );
+
+        pdf.extend(b"\n%%EOF\n");
+        assert!(verify_archive(&tmp("whole.pdf", &pdf)).is_ok());
+
+        let mut zip = b"PK\x03\x04".to_vec();
+        zip.extend(std::iter::repeat_n(0u8, 100));
+        assert!(
+            verify_archive(&tmp("truncated.zip", &zip)).is_err(),
+            "缺少中央目錄結尾記錄應該判定為截斷"
+        );
+
+        zip.extend(b"PK\x05\x06");
+        zip.extend(std::iter::repeat_n(0u8, 18));
+        assert!(verify_archive(&tmp("whole.zip", &zip)).is_ok());
+    }
+
+    #[test]
+    fn archive_gate_rejects_things_that_are_not_archives() {
+        let junk = vec![b'z'; 64];
+        assert!(verify_archive(&tmp("not.pdf", &junk)).is_err());
+    }
+
+    #[test]
+    fn text_gate_rejects_empty_blank_and_invalid_utf8() {
+        assert!(verify_text(&tmp("ok.txt", "內容".as_bytes())).is_ok());
+        assert!(verify_text(&tmp("empty.txt", b"")).is_err());
+        assert!(verify_text(&tmp("blank.txt", b"   \n\t ")).is_err());
+        // 0xFF 在 UTF-8 裡永遠不合法
+        assert!(verify_text(&tmp("bad.txt", &[0xFF, 0xFE, 0x00])).is_err());
+    }
 
     #[test]
     fn parses_mean_volume_from_ffmpeg_output() {

@@ -17,15 +17,26 @@ description: Use when the user wants to download video, audio, or music from a U
 | `1` | 有項目失敗（stderr 寫明原因） |
 | `2` | 用法錯誤，或準備 yt-dlp / ffmpeg 失敗 |
 
-**不要自己去檢查檔案存不存在或大小對不對**，那些 haul 已經做過了（位元組數比對、完整解碼、無聲偵測、影片抽樣）。直接看離開碼。
+**不要自己去檢查檔案存不存在或大小對不對**，那些 haul 已經做過了。直接看離開碼。
+
+每一項還會回報 `verified` 欄位，說明它通過了哪一級檢查：`media`（完整解碼）、
+`image`（解出一張）、`json`（真的 parse 過）、`archive`（magic + 結尾簽章）、
+`text`（合法 UTF-8）、`integrity`（只比對 Content-Length）。不同型別能做到的
+強度差很多，需要判斷保證有多強時看這個欄位。
+
+圖片、PDF、壓縮檔等一般檔案也吃得下。但 **`text/html` 預設不算檔案**——
+存下一頁 HTML 卻報成功，比失敗更糟。真的要存網頁本身才加 `--any`。
 
 ## 用法
 
 ```bash
 haul <網址>...                      # 下載影片
 haul -a <網址>...                   # 只要聲音（抽原始音軌，不重新編碼）
+haul -i <網址>...                   # 只要封面圖／縮圖
+haul -q 1080 <網址>                 # 畫質上限，避免一支 4K 吃掉幾 GB
 haul -o /path/to/dir <網址>         # 指定輸出資料夾（預設 ~/Downloads/Haul）
 haul -c 5 <網址>...                 # 同時下載 5 個（預設 3）
+haul --any <網址>                   # 連網頁本身也存（預設拒絕）
 haul status                         # 列出歷史
 haul logs                           # 看執行紀錄（診斷失敗用）
 haul update                         # 更新 yt-dlp
@@ -78,13 +89,17 @@ haul logs -n 30                                    # 人看的版本
 
 1. **錯誤訊息提到 extractor、格式解析、`Unable to extract`** → 站點改版了。跑 `haul update` 讓 yt-dlp 自我更新，然後重試一次。這是最常見的失敗原因。
 
-2. **`[Liability] This website is not supported`** → yt-dlp 對該站是政策性拒絕。haul 有直接抓取的後備路徑（目前涵蓋 suno.com 與裸媒體連結）；如果後備也沒有對應規則，這個站就是抓不到，據實回報即可。
+2. **`[Liability] This website is not supported`** → yt-dlp 對該站是政策性拒絕。haul 有後備路徑（直接抓取，涵蓋 suno.com 與裸媒體連結）；如果後備也沒有對應規則，這個站就是抓不到，據實回報即可。
 
-3. **HTTP 401 / 403** → 內容是私人的，或需要登入。haul 目前不帶 cookie，這種抓不到。
+3. **圖庫或漫畫頁抓不到** → 錯誤訊息會提示安裝 `gallery-dl`（`pipx install gallery-dl`）。裝好後 haul 會自動用它萃取網址，下載與驗證仍由 haul 做。需要特殊 Referer 或高度 JS 渲染的站仍然不行，別硬試。
 
-4. **「驗證未通過」** → 檔案抓下來了但播不出來（截斷、損毀、整首無聲）。haul 已經把壞檔刪掉了。重試一次；若持續失敗，來源本身可能就有問題。
+4. **HTTP 401 / 403** → 內容是私人的，或需要登入。haul 目前不帶 cookie，這種抓不到。
 
-5. **首次執行卡在準備工具** → haul 第一次會下載 yt-dlp 與 ffmpeg 約 80MB 到 app 資料夾。需要網路。
+5. **HTTP 429** → 被限流。haul 已經會自動退讓重試（同主機間隔 300ms、依 `Retry-After` 退避），還是失敗就是對方限得很緊，過一陣子再試，不要調高 `-c`。
+
+6. **「驗證未通過」** → 檔案抓下來了但沒通過該型別的檢查。haul 已經把壞檔刪掉了。重試一次；若持續失敗，來源本身可能就有問題。
+
+7. **首次執行卡在準備工具** → haul 第一次會下載 yt-dlp 與 ffmpeg 約 80MB 到 app 資料夾。需要網路。
 
 ## 做不到的事
 

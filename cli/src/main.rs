@@ -8,7 +8,7 @@
 
 use haul_core::{
     default_bin_dir, default_log_dir, default_out_dir, load_history, log as hlog, Config, Engine,
-    Event, Item, Mode,
+    Event, Item, Mode, Options,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,6 +25,9 @@ const HELP: &str = r#"haul — 萬用媒體下載器
 
 選項
   -a, --audio               只要聲音（抽出原始音軌，不重新編碼）
+  -i, --image               只要封面圖／縮圖
+  -q, --quality <N|best>    影片畫質上限，例如 1080（預設不設限）
+      --any                 連網頁本身也存下來（預設拒絕，避免假成功）
   -o, --out <資料夾>        輸出位置（預設 ~/Downloads/Haul）
   -c, --concurrency <N>     同時下載幾個（預設 3）
   -n, --lines <N>           logs 要看幾則（預設 50）
@@ -54,7 +57,9 @@ enum Cmd {
 struct Args {
     cmd: Cmd,
     urls: Vec<String>,
-    audio: bool,
+    mode: Mode,
+    any: bool,
+    max_height: Option<u32>,
     out: PathBuf,
     json: bool,
     concurrency: usize,
@@ -65,7 +70,9 @@ fn parse() -> Result<Args, String> {
     let mut a = Args {
         cmd: Cmd::Get,
         urls: Vec::new(),
-        audio: false,
+        mode: Mode::Video,
+        any: false,
+        max_height: None,
         out: default_out_dir(),
         json: false,
         concurrency: 3,
@@ -78,7 +85,21 @@ fn parse() -> Result<Args, String> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => a.cmd = Cmd::Help,
-            "-a" | "--audio" => a.audio = true,
+            "-a" | "--audio" => a.mode = Mode::Audio,
+            "-i" | "--image" => a.mode = Mode::Image,
+            "--any" => a.any = true,
+            "-q" | "--quality" => {
+                let v = it.next().ok_or("--quality 後面要接數字或 best")?;
+                a.max_height = if v.eq_ignore_ascii_case("best") {
+                    None
+                } else {
+                    Some(
+                        v.trim_end_matches('p')
+                            .parse()
+                            .map_err(|_| "--quality 要接數字（例如 1080）或 best".to_string())?,
+                    )
+                };
+            }
             "--json" => a.json = true,
             "-o" | "--out" => {
                 a.out = it
@@ -127,11 +148,14 @@ fn describe(i: &Item) -> Option<String> {
             mb(i.total)
         ),
         "verifying" => format!("[{}] 驗證中 {}", i.id, i.title),
+        // 帶上驗證等級 —— 不同型別能做到的檢查強度差很多，攤開來講
+        // 才不會讓人以為每個「成功」都代表同樣的保證
         "done" => format!(
-            "[{}] ✓ {}{}",
+            "[{}] ✓ {}{}  [{}]",
             i.id,
             i.file.clone().unwrap_or_else(|| i.title.clone()),
-            i.secs.map(|s| format!("  {:.0}s", s)).unwrap_or_default()
+            i.secs.map(|s| format!("  {:.0}s", s)).unwrap_or_default(),
+            i.verified.as_deref().unwrap_or("?")
         ),
         "failed" => format!(
             "[{}] ✗ {} — {}",
@@ -215,6 +239,7 @@ async fn main() -> ExitCode {
 
     let mut cfg = Config::new(args.out.clone(), default_bin_dir());
     cfg.max_downloads = args.concurrency;
+    cfg.allow_html = args.any;
 
     let eng = match Engine::new(cfg, sink) {
         Ok(e) => e,
@@ -229,14 +254,17 @@ async fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let mode = if args.audio { Mode::Audio } else { Mode::Video };
+    let mode = args.mode;
+    let opts = Options {
+        max_height: args.max_height,
+    };
 
     // 每個輸入各自並行解析，否則清單頁的解析會把後面的輸入卡住
     let mut outer = Vec::new();
     for url in args.urls {
         let e = eng.clone();
         outer.push(tokio::spawn(async move {
-            for h in e.add(url, mode).await {
+            for h in e.add(url, mode, opts).await {
                 let _ = h.await;
             }
         }));

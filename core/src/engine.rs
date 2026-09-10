@@ -6,6 +6,7 @@
 
 use crate::direct;
 use crate::extract::{self, Mode, Probe};
+use crate::gallery;
 use crate::log::Logger;
 use crate::tools::{self, Tools};
 use crate::verify;
@@ -37,6 +38,9 @@ pub struct Item {
     pub total: u64,
     pub secs: Option<f64>,
     pub file: Option<String>,
+    /// 通過了哪一級檢查：media | image | json | archive | text | integrity。
+    /// 不同型別能做到的驗證強度天差地遠，攤開來講才不會讓呼叫端誤判。
+    pub verified: Option<String>,
     /// 完成後的完整路徑
     pub path: Option<String>,
     pub error: Option<String>,
@@ -67,6 +71,8 @@ pub struct Config {
     /// 執行紀錄放哪。紀錄是診斷資料不是使用者資料，所以跟著安裝走，
     /// 不跟著 --out 走。
     pub log_dir: PathBuf,
+    /// 允許把網頁本身當檔案存下來。預設 false —— 假成功比失敗更糟。
+    pub allow_html: bool,
     pub max_downloads: usize,
     pub max_verifies: usize,
 }
@@ -77,6 +83,7 @@ impl Config {
             out_dir,
             bin_dir,
             log_dir: default_log_dir(),
+            allow_html: false,
             max_downloads: 3,
             max_verifies: 2,
         }
@@ -86,8 +93,17 @@ impl Config {
 /// 一個項目要怎麼抓。yt-dlp 是主力，Direct 是它拒絕或不認識時的後備。
 #[derive(Clone, Debug)]
 enum Job {
-    Ytdlp { url: String },
-    Direct { media: String, title: String },
+    Ytdlp {
+        url: String,
+    },
+    Direct {
+        media: String,
+        title: String,
+        content_type: Option<String>,
+        /// 圖庫會產出一整批檔案，各自收進自己的子資料夾，
+        /// 否則一話漫畫就把下載資料夾洗爆
+        subdir: Option<String>,
+    },
 }
 
 enum Resolution {
@@ -211,6 +227,7 @@ impl Engine {
             total: 0,
             secs: None,
             file: None,
+            verified: None,
             path: None,
             error: None,
         };
@@ -308,7 +325,12 @@ impl Engine {
     }
 
     /// 加入一筆輸入。回傳每個實際下載任務的 handle，讓 CLI 能等它們跑完。
-    pub async fn add(self: &Arc<Self>, input: String, mode: Mode) -> Vec<JoinHandle<()>> {
+    pub async fn add(
+        self: &Arc<Self>,
+        input: String,
+        mode: Mode,
+        opts: extract::Options,
+    ) -> Vec<JoinHandle<()>> {
         let kind = if mode == Mode::Audio {
             "audio"
         } else {
@@ -387,7 +409,7 @@ impl Engine {
                     Some(Job::Direct { .. }) => "direct",
                     None => "none",
                 },
-                "mode": if mode == Mode::Audio { "audio" } else { "video" },
+                "mode": mode.as_str(),
             }),
         );
 
@@ -395,7 +417,7 @@ impl Engine {
             .map(|(item_id, job)| {
                 let me = self.clone();
                 let tools = tools.clone();
-                tokio::spawn(async move { me.run(tools, item_id, job, mode).await })
+                tokio::spawn(async move { me.run(tools, item_id, job, mode, opts).await })
             })
             .collect()
     }
@@ -420,22 +442,70 @@ impl Engine {
                     .collect(),
             }),
             // yt-dlp 對某些站是政策性拒絕（例如 suno.com），不是還沒實作。
-            // 這種情況才輪到直接抓取。
-            Err(yt_err) => match direct::probe(&self.client, input).await {
-                Ok(found) => Ok(Resolution::Single {
-                    job: Job::Direct {
-                        media: found.media,
-                        title: found.title.clone(),
-                    },
-                    title: found.title,
-                }),
-                // 沒有直接規則時，該讓使用者看到的是 yt-dlp 的原因
-                Err(_) => Err(yt_err),
-            },
+            // 這種情況才輪到圖庫萃取器與直接抓取。
+            Err(yt_err) => {
+                let mut gallery_hint = None;
+                match gallery::find(&self.cfg.bin_dir) {
+                    Some(bin) if gallery::supported(&bin, input).await => {
+                        match gallery::list(&bin, input, gallery::MAX_ITEMS).await {
+                            Ok(entries) => {
+                                let sub = sanitize(&short(input));
+                                self.log.info(
+                                    "gallery.expanded",
+                                    serde_json::json!({ "input": input, "items": entries.len() }),
+                                );
+                                return Ok(Resolution::Playlist {
+                                    title: sub.clone(),
+                                    items: entries
+                                        .into_iter()
+                                        .map(|e| {
+                                            let label = e.title.clone();
+                                            (
+                                                Job::Direct {
+                                                    media: e.url,
+                                                    title: e.title,
+                                                    content_type: None,
+                                                    subdir: Some(sub.clone()),
+                                                },
+                                                label,
+                                            )
+                                        })
+                                        .collect(),
+                                });
+                            }
+                            Err(e) => gallery_hint = Some(format!("（圖庫萃取器：{e}）")),
+                        }
+                    }
+                    // 沒裝就明說要裝什麼，而不是讓使用者對著「不支援」猜
+                    None => {
+                        gallery_hint = Some(
+                            "若這是圖庫或漫畫頁，安裝 gallery-dl 後可支援：pipx install gallery-dl"
+                                .to_string(),
+                        )
+                    }
+                    _ => {}
+                }
+                match direct::probe(&self.client, input, self.cfg.allow_html).await {
+                    Ok(found) => Ok(Resolution::Single {
+                        job: Job::Direct {
+                            media: found.media,
+                            title: found.title.clone(),
+                            content_type: found.content_type,
+                            subdir: None,
+                        },
+                        title: found.title,
+                    }),
+                    // 沒有直接規則時，該讓使用者看到的是 yt-dlp 的原因
+                    Err(_) => Err(match gallery_hint {
+                        Some(h) => anyhow::anyhow!("{yt_err}\n{h}"),
+                        None => yt_err,
+                    }),
+                }
+            }
         }
     }
 
-    async fn run(&self, tools: Tools, id: u64, job: Job, mode: Mode) {
+    async fn run(&self, tools: Tools, id: u64, job: Job, mode: Mode, opts: extract::Options) {
         // 1. 下載（限流）
         let permit = match self.dl.acquire().await {
             Ok(p) => p,
@@ -454,7 +524,9 @@ impl Engine {
             }
         };
 
-        let outcome = self.fetch(&tools, id, &job, mode, &mut progress).await;
+        let outcome = self
+            .fetch(&tools, id, &job, mode, opts, &mut progress)
+            .await;
         drop(permit); // 讓下一個開始下載，驗證走另一條隊
 
         let (staged, reported, forced_stem) = match outcome {
@@ -469,32 +541,13 @@ impl Engine {
         };
         self.update(id, |i| i.status = "verifying".into());
 
-        // 音訊：symphonia 先試，它不認識的編碼交給 ffmpeg 裁決
-        let probe_path = staged.clone();
-        let decoded = tokio::task::spawn_blocking(move || verify::verify(&probe_path)).await;
-        let secs = match decoded {
-            Ok(Ok(v)) => Some(v.secs),
-            Ok(Err(sym_err)) => {
-                match verify::verify_audio_with_ffmpeg(&tools.ffmpeg, &staged).await {
-                    Ok(()) => reported,
-                    Err(ff_err) => {
-                        let _ = tokio::fs::remove_file(&staged).await;
-                        return self
-                            .fail(id, format!("驗證未通過：{ff_err}（symphonia：{sym_err}）"));
-                    }
-                }
-            }
-            Err(e) => return self.fail(id, format!("驗證程序異常：{e}")),
-        };
-
-        // 影片：抽樣確認畫面解得出來
-        if mode == Mode::Video {
-            let dur = reported.or(secs).unwrap_or(0.0);
-            if let Err(e) = verify::verify_video(&tools.ffmpeg, &staged, dur).await {
+        let (secs, level) = match self.gate(&tools, &staged, &job, mode, reported).await {
+            Ok(v) => v,
+            Err(e) => {
                 let _ = tokio::fs::remove_file(&staged).await;
-                return self.fail(id, format!("驗證未通過：{e}"));
+                return self.fail(id, e);
             }
-        }
+        };
 
         // 3. 過關才搬進正式資料夾
         let stem = forced_stem.unwrap_or_else(|| {
@@ -507,7 +560,19 @@ impl Engine {
             .extension()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "bin".into());
-        let dest = unique_path(&self.cfg.out_dir, &sanitize(&stem), &ext);
+        let dir = match &job {
+            Job::Direct {
+                subdir: Some(sub), ..
+            } => {
+                let d = self.cfg.out_dir.join(sanitize(sub));
+                if let Err(e) = tokio::fs::create_dir_all(&d).await {
+                    return self.fail(id, format!("建立資料夾失敗：{e}"));
+                }
+                d
+            }
+            _ => self.cfg.out_dir.clone(),
+        };
+        let dest = unique_path(&dir, &sanitize(&stem), &ext);
 
         if let Err(e) = tokio::fs::rename(&staged, &dest).await {
             return self.fail(id, format!("搬移失敗：{e}"));
@@ -530,6 +595,7 @@ impl Engine {
                 "path": full,
                 "bytes": size,
                 "secs": reported.or(secs),
+                "verified": level.as_str(),
             }),
         );
 
@@ -537,11 +603,92 @@ impl Engine {
             i.status = "done".into();
             i.secs = reported.or(secs);
             i.file = Some(name);
+            i.verified = Some(level.as_str().to_string());
             i.path = Some(full);
             i.bytes = size;
             i.total = size;
             i.error = None;
         });
+    }
+
+    /// 依型別挑最強的檢查跑一遍。回傳（時長、實際通過的等級）。
+    ///
+    /// 不同型別能做到的驗證強度天差地遠，所以等級要回報出去而不是
+    /// 一律報成「成功」—— 呼叫端才知道到底檢查了多少。
+    async fn gate(
+        &self,
+        tools: &Tools,
+        staged: &Path,
+        job: &Job,
+        mode: Mode,
+        reported: Option<f64>,
+    ) -> Result<(Option<f64>, verify::Level), String> {
+        use verify::Level;
+
+        let ext = staged
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let level = match job {
+            // 只要封面圖時產出的是圖片，不是媒體
+            _ if mode == Mode::Image => Level::Image,
+            // yt-dlp 的產出一定是媒體
+            Job::Ytdlp { .. } => Level::Media,
+            // 伺服器講的 Content-Type 比副檔名可靠
+            Job::Direct { content_type, .. } => content_type
+                .as_deref()
+                .and_then(verify::level_for_content_type)
+                .unwrap_or_else(|| verify::level_for(&ext)),
+        };
+
+        match level {
+            Level::Media => {
+                // symphonia 先試，它不認識的編碼交給 ffmpeg 裁決
+                let probe_path = staged.to_path_buf();
+                let decoded = tokio::task::spawn_blocking(move || verify::verify(&probe_path))
+                    .await
+                    .map_err(|e| format!("驗證程序異常：{e}"))?;
+
+                let secs = match decoded {
+                    Ok(v) => Some(v.secs),
+                    Err(sym_err) => verify::verify_audio_with_ffmpeg(&tools.ffmpeg, staged)
+                        .await
+                        .map(|()| reported)
+                        .map_err(|ff_err| {
+                            format!("驗證未通過：{ff_err}（symphonia：{sym_err}）")
+                        })?,
+                };
+
+                // 影片再抽樣確認畫面解得出來
+                if mode == Mode::Video {
+                    let dur = reported.or(secs).unwrap_or(0.0);
+                    verify::verify_video(&tools.ffmpeg, staged, dur)
+                        .await
+                        .map_err(|e| format!("驗證未通過：{e}"))?;
+                }
+                Ok((secs, Level::Media))
+            }
+            Level::Image => verify::verify_image(&tools.ffmpeg, staged)
+                .await
+                .map(|()| (None, Level::Image))
+                .map_err(|e| format!("驗證未通過：{e}")),
+            Level::Json | Level::Archive | Level::Text => {
+                let path = staged.to_path_buf();
+                tokio::task::spawn_blocking(move || match level {
+                    Level::Json => verify::verify_json(&path),
+                    Level::Archive => verify::verify_archive(&path),
+                    _ => verify::verify_text(&path),
+                })
+                .await
+                .map_err(|e| format!("驗證程序異常：{e}"))?
+                .map(|()| (None, level))
+                .map_err(|e| format!("驗證未通過：{e}"))
+            }
+            // 認不得的型別只能確認下載完整，那在下載階段已經比對過 Content-Length。
+            // 誠實地報成 integrity，不假裝驗過內容。
+            Level::Integrity => Ok((None, Level::Integrity)),
+        }
     }
 
     /// 回傳（待驗證的檔案、時長、指定的檔名主體）
@@ -551,18 +698,28 @@ impl Engine {
         tag: u64,
         job: &Job,
         mode: Mode,
+        opts: extract::Options,
         progress: &mut impl FnMut(u64, u64),
     ) -> Result<(PathBuf, Option<f64>, Option<String>)> {
         match job {
+            // 只要封面圖：走另一條路徑。--skip-download 時 yt-dlp 不會印出
+            // 檔案路徑，所以給一個獨立目錄，跑完取裡面唯一的檔案。
+            Job::Ytdlp { url } if mode == Mode::Image => {
+                let dir = self.staging.join(format!("{tag}-thumb"));
+                let path = extract::download_thumbnail(tools, url, &dir).await?;
+                Ok((path, None, None))
+            }
             // yt-dlp 自己會取好檔名，沿用它的
-            Job::Ytdlp { url } => extract::download(tools, url, mode, &self.staging, progress)
-                .await
-                .map(|d| (d.path, d.secs, None)),
+            Job::Ytdlp { url } => {
+                extract::download(tools, url, mode, opts, &self.staging, progress)
+                    .await
+                    .map(|d| (d.path, d.secs, None))
+            }
 
-            Job::Direct { media, title } => {
+            Job::Direct { media, title, .. } => {
                 let ext = ext_of(media);
                 let raw = self.staging.join(format!("{tag}-raw.{ext}"));
-                direct::download(&self.client, media, &raw, progress).await?;
+                direct::download(&self.client, media, &raw, self.cfg.allow_html, progress).await?;
 
                 if mode == Mode::Audio && is_video_container(&ext) {
                     // 影音混合檔要的只是聲音：-c copy 抽出音軌，不重新編碼
