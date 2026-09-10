@@ -108,13 +108,21 @@ async fn fetch(
     let file = tokio::fs::File::create(&part).await?;
     let mut writer = tokio::io::BufWriter::with_capacity(64 * 1024, file);
 
+    // 節流：一個 45MB 的檔案約 2800 個 chunk，每個都回報會把事件佇列灌爆，
+    // 後面的「完成」事件要排很久才輪得到，進度列因此看起來像卡住。
+    let tick = std::time::Duration::from_millis(200);
+    let mut last = std::time::Instant::now() - tick;
+
     let mut got: u64 = 0;
     let mut stream = res.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         got += chunk.len() as u64;
         writer.write_all(&chunk).await?;
-        on_progress(got, total);
+        if last.elapsed() >= tick {
+            last = std::time::Instant::now();
+            on_progress(got, total);
+        }
     }
     writer.flush().await?;
     drop(writer);

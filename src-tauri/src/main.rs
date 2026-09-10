@@ -38,6 +38,8 @@ struct Item {
     total: u64,
     secs: Option<f64>,
     file: Option<String>,
+    /// 完成後的完整路徑，點一下就用系統播放器開啟
+    path: Option<String>,
     error: Option<String>,
 }
 
@@ -103,6 +105,7 @@ impl AppState {
             total: 0,
             secs: None,
             file: None,
+            path: None,
             error: None,
         };
         self.items.lock().unwrap().push(item.clone());
@@ -557,10 +560,12 @@ async fn run_item(
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
+    let full = dest.to_string_lossy().to_string();
     update(&app, &st, id, |i| {
         i.status = "done".into();
         i.secs = downloaded.secs.or(secs);
         i.file = Some(name);
+        i.path = Some(full);
         i.error = None;
     });
 }
@@ -617,6 +622,51 @@ fn open_out_dir(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     cmd.arg(dir).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// 用系統預設播放器開啟一個下載好的檔案。
+///
+/// 路徑來自前端，所以要驗證它確實落在輸出資料夾底下——否則這個指令
+/// 就變成「叫作業系統開啟任意路徑」的通道。canonicalize 會把 .. 解掉，
+/// 符號連結也一併解析，所以比字串比對可靠。
+fn validate_playable(out_dir: &Path, path: &str) -> Result<PathBuf, String> {
+    let target = Path::new(path)
+        .canonicalize()
+        .map_err(|e| format!("找不到這個檔案：{e}"))?;
+    let root = out_dir
+        .canonicalize()
+        .map_err(|e| format!("輸出資料夾有問題：{e}"))?;
+
+    if !target.starts_with(&root) {
+        return Err("這個檔案不在下載資料夾裡".into());
+    }
+    if !target.is_file() {
+        return Err("這不是一個檔案".into());
+    }
+    Ok(target)
+}
+
+#[tauri::command]
+fn open_file(state: State<'_, Arc<AppState>>, path: String) -> Result<(), String> {
+    let target = validate_playable(&state.out_dir, &path)?;
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        // Windows 沒有等價的單一執行檔，走 cmd 的 start；
+        // 第一個空字串是 start 的視窗標題參數，省略會把路徑當標題吃掉
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+
+    cmd.arg(&target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("開啟失敗：{e}"))
+}
+
 #[tauri::command]
 fn clear_done(state: State<'_, Arc<AppState>>) -> Vec<Item> {
     let mut guard = state.items.lock().unwrap();
@@ -665,6 +715,7 @@ fn main() {
             snapshot,
             out_dir,
             open_out_dir,
+            open_file,
             clear_done,
             update_tools
         ])
@@ -795,6 +846,36 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// open_file 收的是前端給的路徑，若不驗證就等於「叫作業系統開啟任意檔案」。
+    #[test]
+    fn open_file_only_accepts_paths_inside_the_download_folder() {
+        let root = std::env::temp_dir().join("haul-open-test");
+        let inside = root.join("ok.mp4");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&inside, b"not really a video, but it is a file").unwrap();
+
+        // 資料夾內的真實檔案
+        assert!(validate_playable(&root, inside.to_str().unwrap()).is_ok());
+
+        // 資料夾本身不是檔案
+        assert!(validate_playable(&root, root.to_str().unwrap()).is_err());
+
+        // 資料夾外的檔案
+        let outside = std::env::temp_dir().join("haul-open-outside.txt");
+        std::fs::write(&outside, b"x").unwrap();
+        assert!(validate_playable(&root, outside.to_str().unwrap()).is_err());
+
+        // .. 逃逸：canonicalize 會把它解開，所以擋得住
+        let escape = format!("{}/../haul-open-outside.txt", root.display());
+        assert!(validate_playable(&root, &escape).is_err());
+
+        // 不存在的路徑
+        assert!(validate_playable(&root, "/nope/nothing.mp4").is_err());
+
+        let _ = std::fs::remove_file(&inside);
+        let _ = std::fs::remove_file(&outside);
     }
 
     #[test]

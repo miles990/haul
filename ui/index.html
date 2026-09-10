@@ -224,6 +224,10 @@
   .track[data-status="done"]   .stat { color: var(--pass); }
   .track[data-status="failed"] .stat { color: var(--fail); }
 
+  /* 抓下來就該能播，所以完成的項目點一下直接用系統播放器開啟 */
+  .track[data-status="done"] { cursor: pointer; }
+  .track[data-status="done"]:hover { background: #20262c; }
+
   /* 分段式電平表 —— 這支工具的招牌，用 repeating gradient 畫成 LED 階梯，
      純 CSS 沒有 per-frame 計算 */
   .meter {
@@ -411,6 +415,9 @@
       refs.fill.style.width = '100%';
     }
 
+    if (it.path) el.dataset.path = it.path;
+    el.title = it.status === 'done' && it.path ? '點一下播放' : '';
+
     refs.why.textContent = it.status === 'failed' ? (it.error || '') : '';
     refs.why.hidden = it.status !== 'failed';
 
@@ -505,13 +512,29 @@
     reset(await invoke('clear_done'));
   });
 
-  listen('item', e => paint(e.payload));
+  // 完成的項目點一下就播放。用委派監聽，佇列再長也只有一個 listener。
+  queue.addEventListener('click', e => {
+    const row = e.target.closest('.track');
+    if (!row || row.dataset.status !== 'done' || !row.dataset.path) return;
+    invoke('open_file', { path: row.dataset.path })
+      .catch(err => say(String(err), true));
+  });
 
   // 首次啟動要抓 yt-dlp 與 ffmpeg（約 80MB），把進度顯示出來，
   // 不然使用者只會看到一個沒反應的視窗
   const setup = document.getElementById('setup');
   const setupText = document.getElementById('setup-text');
   const setupFill = document.getElementById('setup-fill');
+
+  // 已經動用到 yt-dlp / ffmpeg 的狀態。resolving 不算 —— 那時工具可能還在下載。
+  const NEEDS_TOOLS = new Set(['downloading', 'verifying', 'done']);
+
+  listen('item', e => {
+    paint(e.payload);
+    // 走到這些狀態就代表工具已經就緒。單靠 done 事件的話，只要那則事件
+    // 沒送到（例如被進度事件淹沒），進度列就會永遠留在畫面上。
+    if (NEEDS_TOOLS.has(e.payload.status)) setup.hidden = true;
+  });
 
   listen('setup', e => {
     const s = e.payload;
