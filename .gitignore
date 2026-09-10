@@ -1,0 +1,8 @@
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# 下載中的暫存檔
+*.part
+
+.DS_Store
+Thumbs.db

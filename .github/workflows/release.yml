@@ -1,0 +1,56 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 一個 Universal 2 的 .dmg 就同時支援 Intel 與 Apple Silicon，
+          # 使用者不必自己判斷該下載哪一個
+          - label: macOS (Universal)
+            os: macos-latest
+            target: universal-apple-darwin
+            toolchains: aarch64-apple-darwin,x86_64-apple-darwin
+          - label: Windows (x64)
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            toolchains: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.toolchains }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --target ${{ matrix.target }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-dev-{0}', github.run_number) }}
+          releaseName: SunoDL ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+          releaseBody: |
+            macOS 下載 `.dmg`（Intel 與 Apple Silicon 通用），Windows 下載 `.exe` 安裝檔。
+
+            兩邊都沒有做程式碼簽章，所以首次開啟需要放行：
+            - macOS：於「系統設定 → 隱私權與安全性」按「仍要打開」
+            - Windows：SmartScreen 出現時選「更多資訊 → 仍要執行」
+          releaseDraft: true
+          prerelease: false
