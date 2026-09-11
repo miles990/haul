@@ -966,12 +966,23 @@ impl Engine {
 
                 let secs = match decoded {
                     Ok(v) => Some(v.secs),
-                    Err(sym_err) => verify::verify_audio_with_ffmpeg(&tools.ffmpeg, staged)
-                        .await
-                        .map(|()| reported)
-                        .map_err(|ff_err| {
-                            format!("驗證未通過：{ff_err}（symphonia：{sym_err}）")
-                        })?,
+                    Err(sym_err) => {
+                        match verify::verify_audio_with_ffmpeg(&tools.ffmpeg, staged).await {
+                            Ok(verify::Audio::Decoded) => reported,
+                            // 影片可以沒有聲音；畫面解不解得出來由下面的抽樣決定
+                            Ok(verify::Audio::Absent) if mode == Mode::Video => reported,
+                            Ok(verify::Audio::Absent) => {
+                                return Err(format!(
+                                    "驗證未通過：檔案裡沒有音軌（symphonia：{sym_err}）"
+                                ))
+                            }
+                            Err(ff_err) => {
+                                return Err(format!(
+                                    "驗證未通過：{ff_err}（symphonia：{sym_err}）"
+                                ))
+                            }
+                        }
+                    }
                 };
 
                 // 影片再抽樣確認畫面解得出來

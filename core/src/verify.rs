@@ -163,12 +163,25 @@ fn parse_mean_volume(stderr: &str) -> Option<f64> {
     num.parse::<f64>().ok()
 }
 
+/// ffmpeg 對音軌的裁決。
+///
+/// 「沒有音軌」與「音軌壞了」必須分開：影片可以沒有聲音（Facebook 的
+/// 無聲 reel 就是真實案例），但有聲音就一定要解得開。要不要接受
+/// `Absent` 由呼叫端依模式決定——只要聲音的模式沒有音軌就是失敗。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Audio {
+    /// 有音軌，解得開，而且不是整首無聲
+    Decoded,
+    /// ffmpeg 在容器裡找不到音軌
+    Absent,
+}
+
 /// symphonia 不認識的編碼交給 ffmpeg 裁決。
 ///
 /// 只在 symphonia 失敗後才走這裡。symphonia 沒有 opus 解碼器，而 YouTube
 /// 的音訊常常是 webm/opus —— 若不做這層退路，完好的檔案會被判成壞檔，
 /// 那比不檢查還糟。ffmpeg 過得了就代表檔案沒問題。
-pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<()> {
+pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<Audio> {
     // 刻意用預設的 log 等級：-v error 會把 volumedetect 的統計一起壓掉，
     // 所以這裡改用離開碼判損毀、用 mean_volume 判無聲，不倚賴 stderr 是否為空。
     let out = tokio::process::Command::new(ffmpeg)
@@ -183,6 +196,12 @@ pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<()> 
     let msg = String::from_utf8_lossy(&out.stderr);
 
     if !out.status.success() {
+        // -map 0:a:0 在沒有音軌時也會失敗，離開碼跟解碼失敗長得一樣。
+        // 只 copy 不解碼地再問兩次：容器裡有音軌嗎？容器本身打得開嗎？
+        // 打得開卻沒音軌才是 Absent，其餘一律回報原本的解碼錯誤。
+        if !stream_copies(ffmpeg, file, "0:a:0").await? && stream_copies(ffmpeg, file, "0").await? {
+            return Ok(Audio::Absent);
+        }
         let last = msg
             .lines()
             .rev()
@@ -195,8 +214,25 @@ pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<()> 
     match parse_mean_volume(&msg) {
         Some(db) if db < SILENCE_DB => bail!("整首無聲（mean_volume {db:.1} dB）"),
         // 取不到就不判定 —— 寧可漏一個無聲檔，也不要誤殺好檔
-        _ => Ok(()),
+        _ => Ok(Audio::Decoded),
     }
+}
+
+/// `-map` 指定的流能不能原樣 copy 出來。只 copy 不解碼，所以壞掉的音軌
+/// 也會回「能」——這正是要的：它把「沒有」跟「壞了」分開。離開碼就是答案，
+/// 不去解析「Stream map '0:a:0' matches no streams」這種人類看的訊息。
+async fn stream_copies(ffmpeg: &Path, file: &Path, map: &str) -> Result<bool> {
+    let status = tokio::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(file)
+        .args(["-map", map, "-c", "copy", "-t", "0.01", "-f", "null", "-"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map_err(|e| anyhow!("執行 ffmpeg 失敗：{e}"))?;
+    Ok(status.success())
 }
 
 /// 一個檔案通過了哪一級檢查。
@@ -575,6 +611,78 @@ mod tests {
         assert_eq!(sample_points(2.0), vec![0.0]);
         assert_eq!(sample_points(0.0), vec![0.0]);
         assert_eq!(sample_points(f64::NAN), vec![0.0]);
+    }
+
+    /// 找一支系統上的 ffmpeg 來當測試素材，找不到就讓呼叫端跳過
+    fn test_ffmpeg() -> Option<std::path::PathBuf> {
+        [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg",
+        ]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+    }
+
+    /// 用 lavfi 合成一支兩秒的小影片，可選要不要帶音軌
+    fn synth_video(ffmpeg: &Path, name: &str, with_audio: bool) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("haul-verify-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join(name);
+        let mut cmd = std::process::Command::new(ffmpeg);
+        cmd.args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc=duration=2:size=64x64:rate=10");
+        if with_audio {
+            cmd.args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"]);
+        }
+        // 內建編碼器，不倚賴 ffmpeg 的編譯選項
+        cmd.args(["-c:v", "mpeg4"]);
+        if with_audio {
+            cmd.args(["-c:a", "aac"]);
+        }
+        let status = cmd.arg(&out).status().unwrap();
+        assert!(status.success(), "合成測試影片失敗");
+        out
+    }
+
+    /// 真實案例：一支 Facebook reel 本來就沒有聲音（Facebook 回報
+    /// audio_availability: UNAVAILABLE，DASH manifest 只有視訊）。
+    /// 「沒有音軌」與「音軌壞了」必須分開——前者對影片是正常的。
+    #[tokio::test]
+    async fn video_without_audio_track_is_absent_not_broken() {
+        let Some(ff) = test_ffmpeg() else {
+            return;
+        };
+        let f = synth_video(&ff, "silent.mp4", false);
+        assert_eq!(
+            verify_audio_with_ffmpeg(&ff, &f).await.unwrap(),
+            Audio::Absent
+        );
+    }
+
+    #[tokio::test]
+    async fn video_with_audio_track_is_decoded() {
+        let Some(ff) = test_ffmpeg() else {
+            return;
+        };
+        let f = synth_video(&ff, "with-audio.mp4", true);
+        assert_eq!(
+            verify_audio_with_ffmpeg(&ff, &f).await.unwrap(),
+            Audio::Decoded
+        );
+    }
+
+    #[tokio::test]
+    async fn garbage_is_still_an_error() {
+        let Some(ff) = test_ffmpeg() else {
+            return;
+        };
+        let f = tmp(
+            "garbage.mp4",
+            b"this is not an mp4 file at all, not even close",
+        );
+        assert!(verify_audio_with_ffmpeg(&ff, &f).await.is_err());
     }
 
     #[test]
