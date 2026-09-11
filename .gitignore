@@ -7,3 +7,6 @@
 
 .DS_Store
 Thumbs.db
+
+# Claude Code hook 的事件紀錄，每台機器各自產生
+.claude/logs/
