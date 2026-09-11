@@ -5,6 +5,7 @@
 
 pub mod browser;
 pub mod cookies;
+pub mod settings;
 pub mod direct;
 pub mod engine;
 pub mod extract;
