@@ -125,6 +125,21 @@ impl Config {
             max_verifies: 2,
         }
     }
+
+    /// 從使用者設定建 Config。out_dir 與 bin_dir 由外殼決定（設定可覆寫 out_dir）。
+    /// max_height 是每次 add 帶的，不進 Config，所以這裡不碰。
+    pub fn from_settings(
+        s: &crate::settings::Settings,
+        default_out: PathBuf,
+        bin_dir: PathBuf,
+    ) -> Self {
+        let mut cfg = Self::new(s.out_dir.clone().unwrap_or(default_out), bin_dir);
+        cfg.max_downloads = s.concurrency.clamp(1, 8);
+        cfg.cookies_from = s.cookies_from.clone();
+        cfg.browser_path = s.browser_path.clone();
+        cfg.record_max = Duration::from_secs(s.record_max_secs.max(1));
+        cfg
+    }
 }
 
 /// 一個項目要怎麼抓。yt-dlp 是主力，Direct 是它拒絕或不認識時的後備。
@@ -1724,6 +1739,23 @@ mod tests {
         assert_eq!(direct_ext("https://x.com/a.mp3", Mode::Audio), "mp3");
         // 圖片模式不受影響
         assert_eq!(direct_ext("https://x.com/a.jpg", Mode::Image), "jpg");
+    }
+
+    #[test]
+    fn config_from_settings_maps_every_field() {
+        use crate::settings::Settings;
+        let s = Settings {
+            concurrency: 5,
+            max_height: Some(1080),
+            cookies_from: Some("firefox".into()),
+            record_max_secs: 600,
+            ..Settings::default()
+        };
+        let cfg = Config::from_settings(&s, std::path::PathBuf::from("/out"), default_bin_dir());
+        assert_eq!(cfg.max_downloads, 5);
+        assert_eq!(cfg.cookies_from.as_deref(), Some("firefox"));
+        assert_eq!(cfg.record_max.as_secs(), 600);
+        assert_eq!(cfg.out_dir, std::path::PathBuf::from("/out"));
     }
 
     #[test]
