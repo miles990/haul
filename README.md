@@ -29,6 +29,9 @@ workflow 只建了主機架構，已修正，下個版本起會是真正的 univ
 
 完成的項目**點一下就用系統播放器開啟**。歷史會保留，重開 app 仍看得到。
 
+需要登入才看得到的內容，在輸入欄旁邊選「Chrome 的登入」（或 Firefox、Safari…），
+Haul 會借用那個瀏覽器已經有的登入狀態。詳見下面的「登入」。
+
 ## CLI
 
 ```bash
@@ -38,6 +41,7 @@ haul -i <網址>...             # 只要封面圖／縮圖
 haul -q 1080 <網址>           # 畫質上限，避免一支 4K 就吃掉幾 GB
 haul -o <資料夾> <網址>       # 指定輸出位置
 haul --any <網址>             # 連網頁本身也存（預設拒絕，見下）
+haul --cookies chrome <網址>  # 需要登入的內容，借用瀏覽器已有的登入狀態
 haul status                   # 列出歷史
 haul logs                     # 看執行紀錄（診斷失敗用）
 haul update                   # 更新 yt-dlp
@@ -154,6 +158,40 @@ Python」——正好是自動下載想避開的坑。
 補齊剩下的很簡單：**重跑同一個網址即可**，已經下載好的會標成 `existing` 跳過，
 不會重複下載。真的想重抓就加 `--overwrite`。
 
+### 登入
+
+需要登入才看得到的內容，加 `--cookies <瀏覽器>`（GUI 是輸入欄旁的下拉選單）：
+
+```bash
+haul --cookies chrome https://example.com/private/video
+```
+
+**Haul 不碰帳號密碼。** 需要登入時，在你自己的瀏覽器裡登入——那裡看得到網址列、
+用得到密碼管理器、走得完 2FA——Haul 事後只讀 cookie。刻意不在 app 裡做登入畫面，
+帳密不該經過我們的視窗。
+
+三條解析路徑都吃得到同一份登入狀態：
+
+| 路徑 | 做法 |
+| --- | --- |
+| yt-dlp | 直接傳 `--cookies-from-browser`，解密瀏覽器 cookie 庫由它負責（跨瀏覽器跨平台都維護著） |
+| gallery-dl | 吃 yt-dlp 匯出的 Netscape cookie 檔 |
+| 直接抓取 | 從同一份檔案挑出該主機的 cookie 組成 `Cookie` 標頭 |
+
+自己去解 Chrome 在 macOS keychain 裡的加密太脆弱，所以三條路徑的來源都是 yt-dlp。
+匯出的檔案放在 app 資料夾的 `bin/cookies.txt`，權限鎖成 600，換瀏覽器就重新匯出。
+
+支援 brave、chrome、chromium、edge、firefox、opera、safari、vivaldi、whale；
+yt-dlp 的 `chrome:Profile 1`（指定 profile）或 `chrome:/path/to/profile`（指定 profile
+目錄）寫法也可以，字串原樣交給 yt-dlp。
+
+遇到 401 / 403 時，Haul 會在系統瀏覽器**開一次**該網址的登入頁
+（整個 session 只開一次——一個 200 張的圖庫全部 401 時不該彈 200 個分頁），
+登入後帶 `--cookies` 重跑同一個指令即可。
+
+開始處理登入身分之後，紀錄裡的網址會把 `token`、`sig`、`session` 這類看起來像
+機密的查詢參數遮掉，貼進 issue 不會外洩簽章。
+
 ### 對同一個主機會限速
 
 整批圖庫是對同一台主機連發幾百個請求。實測 223 張圖在沒有限速時只成功 4 張，
@@ -219,7 +257,8 @@ git tag v0.1.0 && git push origin v0.1.0
 ## 限制
 
 - 走 DRM（Widevine EME）保護的串流服務不處理，也不打算處理
-- 需要登入才看得到的內容目前沒有帶 cookie，會失敗
+- 需要登入的內容要靠 `--cookies` 借用瀏覽器的登入狀態；沒開過該瀏覽器、或瀏覽器
+  沒登入過該站，一樣抓不到
 - 首次啟動需要網路取得 yt-dlp 與 ffmpeg
 
 ## 專案結構
@@ -229,6 +268,7 @@ core/          haul-core：下載引擎。不知道 UI 的存在，透過 Sink �
   engine.rs      佇列、限流、驗證流程、檔名處理、歷史
   extract.rs     驅動 yt-dlp
   direct.rs      yt-dlp 拒絕時的後備（裸媒體連結、Suno）
+  cookies.rs     借用瀏覽器登入狀態：由 yt-dlp 匯出，分給另外兩條路徑
   tools.rs       取得與更新 yt-dlp / ffmpeg
   verify.rs      驗證閘門
   log.rs         執行紀錄與輪替

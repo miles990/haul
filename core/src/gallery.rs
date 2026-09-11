@@ -64,10 +64,20 @@ pub async fn supported(bin: &Path, url: &str) -> bool {
 }
 
 /// 列出頁面上的圖片網址，不下載。
-pub async fn list(bin: &Path, url: &str, limit: usize) -> Result<Vec<Entry>> {
+pub async fn list(
+    bin: &Path,
+    url: &str,
+    limit: usize,
+    cookie_file: Option<&Path>,
+) -> Result<Vec<Entry>> {
     let limit = limit.clamp(1, MAX_ITEMS);
-    let out = Command::new(bin)
-        .args(["--dump-json", "--range", &format!("1-{limit}")])
+    let mut cmd = Command::new(bin);
+    cmd.args(["--dump-json", "--range", &format!("1-{limit}")]);
+    // gallery-dl 要的是檔案不是瀏覽器名稱，所以共用 yt-dlp 匯出的那份
+    if let Some(f) = cookie_file {
+        cmd.arg("--cookies").arg(f);
+    }
+    let out = cmd
         .arg(url)
         .stdin(Stdio::null())
         .output()

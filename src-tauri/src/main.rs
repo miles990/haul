@@ -32,7 +32,13 @@ fn engine(app: &AppHandle) -> Arc<Engine> {
 }
 
 #[tauri::command]
-fn add(app: AppHandle, text: String, mode: String, quality: Option<u32>) -> Result<usize, String> {
+fn add(
+    app: AppHandle,
+    text: String,
+    mode: String,
+    quality: Option<u32>,
+    cookies: Option<String>,
+) -> Result<usize, String> {
     let inputs: Vec<String> = text
         .split(|c: char| c.is_whitespace())
         .map(str::trim)
@@ -49,6 +55,13 @@ fn add(app: AppHandle, text: String, mode: String, quality: Option<u32>) -> Resu
         max_height: quality,
     };
     let eng = engine(&app);
+
+    if let Some(b) = cookies.as_deref() {
+        if !haul_core::cookies::is_supported(b) {
+            return Err(format!("不認得的瀏覽器：{b}"));
+        }
+    }
+    eng.set_cookies_from(cookies);
     let n = inputs.len();
     for input in inputs {
         let e = eng.clone();

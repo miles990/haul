@@ -4,6 +4,7 @@
 //! Tauri event 推給 webview，CLI 把同一批事件印成 NDJSON。兩邊共用同一套
 //! 行為，不會各自長出一份。
 
+use crate::cookies;
 use crate::direct;
 use crate::extract::{self, Mode, Probe};
 use crate::gallery;
@@ -15,7 +16,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{OnceCell, Semaphore};
@@ -76,6 +77,9 @@ pub struct Config {
     /// 目標檔案已存在時照樣重新下載。預設 false：補齊一個部分失敗的
     /// 圖庫時，重跑不該產生一堆 xxx (2).jpg。
     pub overwrite: bool,
+    /// 從哪個瀏覽器讀 cookie（chrome / firefox / safari…）。
+    /// Haul 不碰帳密，只用使用者已經有的 session。
+    pub cookies_from: Option<String>,
     pub max_downloads: usize,
     pub max_verifies: usize,
 }
@@ -88,6 +92,7 @@ impl Config {
             log_dir: default_log_dir(),
             allow_html: false,
             overwrite: false,
+            cookies_from: None,
             max_downloads: 3,
             max_verifies: 2,
         }
@@ -135,6 +140,15 @@ pub struct Engine {
     seen: Mutex<HashSet<String>>,
     client: reqwest::Client,
     tools: OnceCell<Tools>,
+    /// 執行期可切換的 cookie 來源。GUI 的下拉選單要能真的生效，
+    /// 綁死在啟動時的 Config 上就只是個裝飾品。
+    cookies_from: Mutex<Option<String>>,
+    /// yt-dlp 匯出的 Netscape cookie 檔（連同它是哪個瀏覽器匯出的），
+    /// 給 gallery-dl 與直接抓取共用。換瀏覽器就重新匯出。
+    cookie_file: Mutex<Option<(String, PathBuf)>>,
+    /// 登入頁整個 session 只開一次。一個 200 張的圖庫全部 401 時，
+    /// 不該給使用者彈 200 個分頁。
+    login_opened: AtomicBool,
     log: Logger,
     dl: Semaphore,
     vf: Semaphore,
@@ -156,6 +170,7 @@ impl Engine {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .build()?;
+        let cfg_cookies = cfg.cookies_from.clone();
 
         let log = Logger::new(&cfg.log_dir)?;
         log.info(
@@ -180,6 +195,9 @@ impl Engine {
             seen: Mutex::new(HashSet::new()),
             client,
             tools: OnceCell::new(),
+            cookies_from: Mutex::new(cfg_cookies),
+            cookie_file: Mutex::new(None),
+            login_opened: AtomicBool::new(false),
             next_id: AtomicU64::new(next),
         }))
     }
@@ -268,6 +286,21 @@ impl Engine {
 
     fn fail(&self, id: u64, why: impl Into<String>) {
         let why = why.into();
+
+        // 需要登入的話開一次登入頁，而不是只丟一行錯誤讓使用者自己猜
+        if why.contains("401") || why.contains("403") || why.contains("需要登入") {
+            let input = self
+                .items
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.id == id)
+                .map(|i| i.input.clone());
+            if let Some(u) = input.filter(|u| u.starts_with("http")) {
+                self.offer_login(&u);
+            }
+        }
+
         // 失敗的完整原因是紀錄最有價值的部分 —— 介面上只看得到一行，
         // 診斷時需要的是這裡
         self.log
@@ -320,6 +353,73 @@ impl Engine {
             })
             .await
             .cloned()
+    }
+
+    /// 目前的 cookie 來源
+    pub fn cookies_from(&self) -> Option<String> {
+        self.cookies_from.lock().unwrap().clone()
+    }
+
+    /// 切換 cookie 來源。換了就丟掉既有的匯出檔，下次用到時重新匯出。
+    pub fn set_cookies_from(&self, browser: Option<String>) {
+        let mut cur = self.cookies_from.lock().unwrap();
+        if *cur != browser {
+            *cur = browser;
+            *self.cookie_file.lock().unwrap() = None;
+        }
+    }
+
+    fn browser(&self) -> Option<String> {
+        self.cookies_from.lock().unwrap().clone()
+    }
+
+    /// 匯出一份 Netscape cookie 檔給 gallery-dl 與直接抓取用。
+    ///
+    /// 快取綁在瀏覽器名稱上，換來源就重新匯出。失敗不是致命錯誤，
+    /// 只是那兩條路徑沒有 cookie。
+    async fn cookie_file(&self, tools: &Tools, url: &str) -> Option<PathBuf> {
+        let browser = self.browser()?;
+
+        // 同一個瀏覽器已經匯出過就直接用
+        if let Some((b, p)) = self.cookie_file.lock().unwrap().as_ref() {
+            if *b == browser {
+                return Some(p.clone());
+            }
+        }
+
+        let dest = self.cfg.bin_dir.join("cookies.txt");
+        match cookies::export(&tools.ytdlp, &browser, url, &dest).await {
+            Ok(p) => {
+                self.log.info(
+                    "cookies.exported",
+                    serde_json::json!({ "browser": browser }),
+                );
+                *self.cookie_file.lock().unwrap() = Some((browser, p.clone()));
+                Some(p)
+            }
+            Err(e) => {
+                self.log.warn(
+                    "cookies.failed",
+                    serde_json::json!({ "browser": browser, "error": e.to_string() }),
+                );
+                None
+            }
+        }
+    }
+
+    /// 需要登入時開使用者自己的瀏覽器。整個 session 只開一次。
+    ///
+    /// 刻意不在 app 裡做登入畫面：帳密不該經過我們的視窗，使用者在真正的
+    /// 瀏覽器裡才看得到網址列、用得到密碼管理器、走得完 2FA。
+    fn offer_login(&self, page_url: &str) {
+        if self.login_opened.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        self.log.info(
+            "login.opened",
+            serde_json::json!({ "url": cookies::redact(page_url) }),
+        );
+        let _ = open_with_system(Path::new(page_url));
     }
 
     /// 讓 yt-dlp 自我更新。站點改版時靠這個跟上。
@@ -406,7 +506,7 @@ impl Engine {
             "input.resolved",
             serde_json::json!({
                 "id": id,
-                "input": input,
+                "input": cookies::redact(&input),
                 "items": jobs.len(),
                 "source": match jobs.first().map(|(_, j)| j) {
                     Some(Job::Ytdlp { .. }) => "ytdlp",
@@ -431,6 +531,10 @@ impl Engine {
 
     /// 決定一個輸入該怎麼抓
     async fn resolve(&self, tools: &Tools, input: &str) -> Result<Resolution> {
+        // 先備妥 cookie 檔，gallery-dl 與直接抓取都要用
+        let cookie_file = self.cookie_file(tools, input).await;
+        let cookie_file = cookie_file.as_deref();
+
         // 一眼就是檔案的網址不要問任何萃取器。yt-dlp 與 gallery-dl 都宣稱
         // 吃得下裸檔案網址，誰接手取決於當下網路狀況 —— 那會讓同一個輸入
         // 在不同時候產生不同檔名與不同驗證等級。
@@ -447,7 +551,7 @@ impl Engine {
             });
         }
 
-        match extract::probe(tools, input).await {
+        match extract::probe(tools, input, self.browser().as_deref()).await {
             Ok(Probe::Single { title }) => Ok(Resolution::Single {
                 job: Job::Ytdlp {
                     url: input.to_string(),
@@ -470,12 +574,12 @@ impl Engine {
                 let mut gallery_hint = None;
                 match gallery::find(&self.cfg.bin_dir) {
                     Some(bin) if gallery::supported(&bin, input).await => {
-                        match gallery::list(&bin, input, gallery::MAX_ITEMS).await {
+                        match gallery::list(&bin, input, gallery::MAX_ITEMS, cookie_file).await {
                             Ok(entries) => {
                                 let sub = sanitize(&short(input));
                                 self.log.info(
                                     "gallery.expanded",
-                                    serde_json::json!({ "input": input, "items": entries.len() }),
+                                    serde_json::json!({ "input": cookies::redact(input), "items": entries.len() }),
                                 );
                                 return Ok(Resolution::Playlist {
                                     title: sub.clone(),
@@ -773,20 +877,49 @@ impl Engine {
             // 檔案路徑，所以給一個獨立目錄，跑完取裡面唯一的檔案。
             Job::Ytdlp { url } if mode == Mode::Image => {
                 let dir = self.staging.join(format!("{tag}-thumb"));
-                let path = extract::download_thumbnail(tools, url, &dir).await?;
+                let path = extract::download_thumbnail(tools, url, &dir, self.browser().as_deref())
+                    .await?;
                 Ok((path, None, None))
             }
             // yt-dlp 自己會取好檔名，沿用它的
-            Job::Ytdlp { url } => {
-                extract::download(tools, url, mode, opts, &self.staging, progress)
-                    .await
-                    .map(|d| (d.path, d.secs, None))
-            }
+            Job::Ytdlp { url } => extract::download(
+                tools,
+                url,
+                mode,
+                opts,
+                self.browser().as_deref(),
+                &self.staging,
+                progress,
+            )
+            .await
+            .map(|d| (d.path, d.secs, None)),
 
             Job::Direct { media, title, .. } => {
                 let ext = ext_of(media);
                 let raw = self.staging.join(format!("{tag}-raw.{ext}"));
-                direct::download(&self.client, media, &raw, self.cfg.allow_html, progress).await?;
+                let cookie = self
+                    .cookie_file
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|(_, f)| cookies::header_for_host(f, &host_of(media)));
+                // 有沒有帶 cookie 要看得見，否則「設了卻沒生效」會無聲無息
+                self.log.info(
+                    "direct.fetch",
+                    serde_json::json!({
+                        "url": cookies::redact(media),
+                        "cookie": cookie.is_some(),
+                    }),
+                );
+                direct::download(
+                    &self.client,
+                    media,
+                    &raw,
+                    self.cfg.allow_html,
+                    cookie.as_deref(),
+                    progress,
+                )
+                .await?;
 
                 if mode == Mode::Audio && is_video_container(&ext) {
                     // 影音混合檔要的只是聲音：-c copy 抽出音軌，不重新編碼
@@ -866,6 +999,17 @@ fn direct_ext(media: &str, mode: Mode) -> String {
     } else {
         ext
     }
+}
+
+/// 網址的主機名，去掉 port —— cookie 檔的 domain 欄沒有 port，
+/// 留著的話自架在非標準 port 上的服務會無聲地拿不到 cookie
+fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .and_then(|r| r.split('/').next())
+        .and_then(|a| a.split(':').next())
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 fn ext_of(url: &str) -> String {
@@ -1064,6 +1208,14 @@ mod tests {
         assert_eq!(direct_ext("https://x.com/a.mp3", Mode::Audio), "mp3");
         // 圖片模式不受影響
         assert_eq!(direct_ext("https://x.com/a.jpg", Mode::Image), "jpg");
+    }
+
+    #[test]
+    fn host_of_drops_port_so_it_matches_cookie_domains() {
+        // cookie 檔的 domain 欄沒有 port，自架服務常跑在非標準 port 上
+        assert_eq!(host_of("http://127.0.0.1:8731/locked.jpg"), "127.0.0.1");
+        assert_eq!(host_of("https://nas.local:5001/a/b.mp4"), "nas.local");
+        assert_eq!(host_of("https://Example.COM/x"), "example.com");
     }
 
     #[test]

@@ -94,6 +94,19 @@
   .hint.bad { color: var(--fail); }
 
   /* 影片 / 只要聲音 —— 分段切換，安靜地待在輸入欄底部 */
+  select {
+    margin-left: auto;
+    margin-right: 10px;
+    padding: 4px 6px;
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    background: var(--panel);
+    color: var(--dim);
+    font: 500 12px/1 var(--sans);
+  }
+
+  select:hover { color: var(--ink); }
+
   .modes {
     display: flex;
     border: 1px solid var(--edge);
@@ -311,6 +324,14 @@
         <button type="button" class="mode on" data-mode="video" role="radio" aria-checked="true">影片</button>
         <button type="button" class="mode" data-mode="audio" role="radio" aria-checked="false">只要聲音</button>
       </div>
+      <select id="cookies" title="需要登入的內容用這個。Haul 不碰帳密，只讀瀏覽器已有的 cookie。">
+        <option value="">不用登入</option>
+        <option value="chrome">Chrome 的登入</option>
+        <option value="firefox">Firefox 的登入</option>
+        <option value="safari">Safari 的登入</option>
+        <option value="edge">Edge 的登入</option>
+        <option value="brave">Brave 的登入</option>
+      </select>
       <button class="primary" id="go">加入佇列</button>
     </div>
   </div>
@@ -477,7 +498,8 @@
     if (!text) { input.focus(); return; }
     go.disabled = true;
     try {
-      await invoke('add', { text, mode });
+      const cookies = document.getElementById('cookies').value || null;
+      await invoke('add', { text, mode, cookies });
       input.value = '';
     } catch (e) {
       // 後端把「看不懂輸入」當成錯誤回來，顯示在提示位置

@@ -360,6 +360,7 @@ pub async fn download<F>(
     media_url: &str,
     dest: &Path,
     allow_html: bool,
+    cookie: Option<&str>,
     mut on_progress: F,
 ) -> Result<u64>
 where
@@ -372,11 +373,11 @@ where
 
     for attempt in 1..=MAX_ATTEMPTS {
         wait_turn(&host).await;
-        let r = client
-            .get(media_url)
-            .header("user-agent", ua)
-            .send()
-            .await?;
+        let mut req = client.get(media_url).header("user-agent", ua);
+        if let Some(c) = cookie {
+            req = req.header("cookie", c);
+        }
+        let r = req.send().await?;
         let status = r.status();
         let code = status.as_u16();
 

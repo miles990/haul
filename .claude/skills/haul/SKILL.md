@@ -37,6 +37,7 @@ haul -q 1080 <網址>                 # 畫質上限，避免一支 4K 吃掉幾
 haul -o /path/to/dir <網址>         # 指定輸出資料夾（預設 ~/Downloads/Haul）
 haul -c 5 <網址>...                 # 同時下載 5 個（預設 3）
 haul --any <網址>                   # 連網頁本身也存（預設拒絕）
+haul --cookies chrome <網址>        # 需要登入的內容，借用瀏覽器已有的登入狀態
 haul status                         # 列出歷史
 haul logs                           # 看執行紀錄（診斷失敗用）
 haul update                         # 更新 yt-dlp
@@ -95,7 +96,11 @@ haul logs -n 30                                    # 人看的版本
 
    圖庫**部分失敗是常態**（實測 222 張成功 173 張，失敗全是對方節流），離開碼會是 1。**要補齊就重跑同一個網址**——已下載好的會標成 `existing` 跳過，不會重複下載。真的要重抓才加 `--overwrite`。
 
-4. **HTTP 401 / 403** → 內容是私人的，或需要登入。haul 目前不帶 cookie，這種抓不到。
+4. **HTTP 401 / 403** → 內容是私人的，或需要登入。加 `--cookies <瀏覽器>`
+   （chrome / firefox / safari / edge / brave…）借用使用者瀏覽器已有的登入狀態重試。
+   haul 遇到 401 / 403 時會自動在系統瀏覽器開一次該網址的登入頁；**請使用者在那裡登入**
+   （不要向使用者索取帳密、也不要代替使用者輸入），登入完成後再帶 `--cookies` 重跑。
+   帶了 cookie 仍 401 / 403 就是該帳號本來就看不到，據實回報。
 
 5. **HTTP 429** → 被限流。haul 已經會自動退讓重試（同主機間隔 300ms、依 `Retry-After` 退避），還是失敗就是對方限得很緊，過一陣子再試，不要調高 `-c`。
 
@@ -106,7 +111,7 @@ haul logs -n 30                                    # 人看的版本
 ## 做不到的事
 
 - **DRM 保護的串流**（Netflix、Spotify、Apple Music 這類走 Widevine 的）完全不處理
-- **需要登入的內容**目前沒有帶 cookie
+- **帳號密碼**：haul 只讀瀏覽器已有的 cookie，不做登入。需要登入就請使用者在瀏覽器登入
 - 不要嘗試繞過上面兩項
 
 ## 沒安裝的話
@@ -126,5 +131,6 @@ cd <haul repo> && cargo build --release --workspace
 | 歷史 | 輸出資料夾裡的 `.haul-history.jsonl`（append-only） |
 | 執行紀錄 | `~/Library/Application Support/com.haul.desktop/logs/haul.log`（4MB 輪替、保留 3 份） |
 | yt-dlp / ffmpeg | 同上目錄的 `bin/` |
+| 匯出的 cookie | 同上目錄的 `bin/cookies.txt`（權限 600，等同登入憑證，不要貼出來） |
 
 紀錄跟著安裝走而不是跟著 `-o` 走——診斷時不必回想當初輸出到哪個資料夾。

@@ -74,6 +74,14 @@ fn base_args(cmd: &mut Command) {
     cmd.args(["--ignore-config", "--no-warnings", "--no-colors"]);
 }
 
+/// 需要登入的內容要帶使用者自己的 cookie。Haul 不碰帳密，只讀瀏覽器
+/// 已經有的 session。
+fn cookie_args(cmd: &mut Command, browser: Option<&str>) {
+    if let Some(b) = browser {
+        cmd.arg("--cookies-from-browser").arg(b);
+    }
+}
+
 fn stderr_tail(lines: &[String]) -> String {
     let msg = lines
         .iter()
@@ -91,9 +99,10 @@ fn stderr_tail(lines: &[String]) -> String {
 }
 
 /// 問 yt-dlp 這個連結是什麼，不下載任何媒體。
-pub async fn probe(tools: &Tools, url: &str) -> Result<Probe> {
+pub async fn probe(tools: &Tools, url: &str, browser: Option<&str>) -> Result<Probe> {
     let mut cmd = Command::new(&tools.ytdlp);
     base_args(&mut cmd);
+    cookie_args(&mut cmd, browser);
     cmd.args(["-J", "--flat-playlist"]).arg(url);
 
     let out = cmd
@@ -160,6 +169,7 @@ pub async fn download<F>(
     url: &str,
     mode: Mode,
     opts: Options,
+    browser: Option<&str>,
     staging: &Path,
     mut on_progress: F,
 ) -> Result<Downloaded>
@@ -168,6 +178,7 @@ where
 {
     let mut cmd = Command::new(&tools.ytdlp);
     base_args(&mut cmd);
+    cookie_args(&mut cmd, browser);
     cmd.args([
         "--newline",
         "--no-playlist",
@@ -301,11 +312,17 @@ where
 /// `--skip-download` 時 yt-dlp 的 `--print after_move:` 完全不輸出（實測確認），
 /// 所以不能靠它拿路徑。改成每個項目給一個獨立的空目錄，跑完取裡面唯一的
 /// 檔案——目錄是獨占的，「那個檔案」就毫無歧義。
-pub async fn download_thumbnail(tools: &Tools, url: &str, dir: &Path) -> Result<PathBuf> {
+pub async fn download_thumbnail(
+    tools: &Tools,
+    url: &str,
+    dir: &Path,
+    browser: Option<&str>,
+) -> Result<PathBuf> {
     tokio::fs::create_dir_all(dir).await?;
 
     let mut cmd = Command::new(&tools.ytdlp);
     base_args(&mut cmd);
+    cookie_args(&mut cmd, browser);
     cmd.args([
         "--skip-download",
         "--write-thumbnail",

@@ -29,6 +29,8 @@ const HELP: &str = r#"haul — 萬用媒體下載器
   -q, --quality <N|best>    影片畫質上限，例如 1080（預設不設限）
       --any                 連網頁本身也存下來（預設拒絕，避免假成功）
       --overwrite           目標檔案已存在時照樣重抓（預設跳過）
+      --cookies <瀏覽器>    用該瀏覽器的登入狀態（chrome/firefox/safari/edge…）
+                            需要登入的內容用這個。Haul 不碰帳密，只讀 cookie。
   -o, --out <資料夾>        輸出位置（預設 ~/Downloads/Haul）
   -c, --concurrency <N>     同時下載幾個（預設 3）
   -n, --lines <N>           logs 要看幾則（預設 50）
@@ -45,6 +47,7 @@ const HELP: &str = r#"haul — 萬用媒體下載器
   haul -a --json https://example.com/playlist/xyz
   haul status --json | jq 'select(.status == "done") | .path'
   haul logs --json | jq 'select(.level == "error")'
+  haul --cookies chrome https://example.com/private/video
 "#;
 
 enum Cmd {
@@ -61,6 +64,7 @@ struct Args {
     mode: Mode,
     any: bool,
     overwrite: bool,
+    cookies_from: Option<String>,
     max_height: Option<u32>,
     out: PathBuf,
     json: bool,
@@ -75,6 +79,7 @@ fn parse() -> Result<Args, String> {
         mode: Mode::Video,
         any: false,
         overwrite: false,
+        cookies_from: None,
         max_height: None,
         out: default_out_dir(),
         json: false,
@@ -92,6 +97,16 @@ fn parse() -> Result<Args, String> {
             "-i" | "--image" => a.mode = Mode::Image,
             "--any" => a.any = true,
             "--overwrite" => a.overwrite = true,
+            "--cookies" => {
+                let b = it.next().ok_or("--cookies 後面要接瀏覽器名稱")?;
+                if !haul_core::cookies::is_supported(&b) {
+                    return Err(format!(
+                        "不認得的瀏覽器：{b}（支援 {}）",
+                        haul_core::cookies::BROWSERS.join("、")
+                    ));
+                }
+                a.cookies_from = Some(b);
+            }
             "-q" | "--quality" => {
                 let v = it.next().ok_or("--quality 後面要接數字或 best")?;
                 a.max_height = if v.eq_ignore_ascii_case("best") {
@@ -206,6 +221,20 @@ async fn main() -> ExitCode {
     let (f2, d2) = (failed.clone(), done.clone());
 
     let sink: haul_core::Sink = Arc::new(move |ev: Event| {
+        // 先計數再決定怎麼印。曾經把這段放在 --json 的提早 return 後面，
+        // 結果 --json 模式下失敗永遠不算數、離開碼永遠是 0 —— 正好是
+        // 給 agent 用的那條路徑，離開碼是它唯一相信的東西。
+        if let Event::Item(i) = &ev {
+            match i.status.as_str() {
+                "done" => {
+                    d2.fetch_add(1, Ordering::Relaxed);
+                }
+                "failed" => {
+                    f2.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
         if json {
             if let Ok(line) = serde_json::to_string(&ev) {
                 println!("{line}");
@@ -228,23 +257,13 @@ async fn main() -> ExitCode {
             }
             _ => {}
         }
-        if let Event::Item(i) = &ev {
-            match i.status.as_str() {
-                "done" => {
-                    d2.fetch_add(1, Ordering::Relaxed);
-                }
-                "failed" => {
-                    f2.fetch_add(1, Ordering::Relaxed);
-                }
-                _ => {}
-            }
-        }
     });
 
     let mut cfg = Config::new(args.out.clone(), default_bin_dir());
     cfg.max_downloads = args.concurrency;
     cfg.allow_html = args.any;
     cfg.overwrite = args.overwrite;
+    cfg.cookies_from = args.cookies_from.clone();
 
     let eng = match Engine::new(cfg, sink) {
         Ok(e) => e,
