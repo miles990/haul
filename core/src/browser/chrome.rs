@@ -100,6 +100,10 @@ pub fn launch_args(data_dir: &Path) -> Vec<String> {
         "--no-default-browser-check".into(),
         // 很多播放器要按了才載入媒體；允許自動播放讓偵測不必等使用者
         "--autoplay-policy=no-user-gesture-required".into(),
+        // 錄製用：分頁自己呼叫 getDisplayMedia({preferCurrentTab}) 時直接同意，
+        // 不跳選擇框。實測過「依標題自動選別的分頁」那類旗標選不到分頁，
+        // 只有自己擷取自己這條路是零互動的。
+        "--auto-accept-this-tab-capture".into(),
         "about:blank".into(),
     ]
 }
@@ -108,6 +112,11 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 啟動並等到 DevTools 可以連。
 pub async fn launch(exe: &Path, data_dir: &Path) -> Result<Chrome> {
+    launch_with(exe, data_dir, &[]).await
+}
+
+/// 同上，多帶幾個旗標。實驗與測試用。
+pub async fn launch_with(exe: &Path, data_dir: &Path, extra: &[String]) -> Result<Chrome> {
     tokio::fs::create_dir_all(data_dir).await?;
     let port_file = data_dir.join("DevToolsActivePort");
     // 上一次留下的檔案會讓我們連到一個已經不存在的 port
@@ -115,6 +124,7 @@ pub async fn launch(exe: &Path, data_dir: &Path) -> Result<Chrome> {
 
     let child = Command::new(exe)
         .args(launch_args(data_dir))
+        .args(extra)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

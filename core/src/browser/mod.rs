@@ -8,4 +8,5 @@
 
 pub mod cdp;
 pub mod chrome;
+pub mod record;
 pub mod sniff;

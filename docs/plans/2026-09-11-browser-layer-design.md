@@ -104,6 +104,15 @@ browser/
 Chrome 自己的「此分頁正在分享」藍條會出現，這是誠實的訊號，不擋也擋不掉；
 藍條上的停止會觸發 track `ended`，我們照收尾。
 
+> **2026-09-11 實作時修正**：spike 實測 `--auto-select-tab-capture-source-by-title`
+> 與 `--auto-select-desktop-capture-source` 都選不到分頁（前者選到整個螢幕、後者
+> 選擇框開著逾時）。改成**目標分頁自己** `getDisplayMedia({preferCurrentTab: true})`，
+> Chrome 帶 `--auto-accept-this-tab-capture`，626 ms 內零互動拿到分頁的影音。
+> 所以不再有面板視窗：擷取與 MediaRecorder 跑在目標分頁裡，chunk 經 binding 回
+> Haul；狀態顯示交給 Chrome 的藍條與 Haul 的 UI。代價與限制：分頁換頁會殺掉錄製器
+>（監聽 `pagehide` 先停，最多掉 1 秒）；`getDisplayMedia` 只在 secure context 可用，
+> 純 `http://` 的頁面（localhost 除外）錄不了。
+
 瀏覽器中途關掉：已收到的 chunk 照樣轉封裝、驗證——半支片也比沒有好。
 
 ## 設定

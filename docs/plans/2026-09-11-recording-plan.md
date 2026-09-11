@@ -12,6 +12,12 @@
 
 **先驗證再蓋：** Task 1 是 spike，驗證三個技術假設。任何一個不成立就**停下來回報**，不要繞路硬做——那代表設計要改。
 
+> **Task 1 結果（2026-09-11）**：假設 1 不成立——依標題／名稱自動選分頁的兩個旗標都選不到分頁。
+> 改走「目標分頁自己 `getDisplayMedia({preferCurrentTab: true})` + `--auto-accept-this-tab-capture`」，
+> 341 ms 零互動成功。**因此 Task 3、5 調整為：沒有面板視窗**，`PANEL_JS` 改名 `RECORD_JS` 注入
+> 目標分頁（擷取、MediaRecorder、播放狀態回報、`pagehide` 時停止都在同一段），binding 只在
+> 目標 session 上；`TAB_MARK` 與標題替換整個拿掉。Task 3 的 `WATCH_JS` 併進 `RECORD_JS`。
+
 ---
 
 ### Task 1: Spike — 驗證三個假設
