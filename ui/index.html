@@ -128,8 +128,8 @@
   .mode:hover:not(.on) { background: #2b3138; color: var(--ink); }
   .mode.on { background: #3a2d14; color: var(--lamp); }
 
-  /* 首次啟動抓 yt-dlp 與 ffmpeg 時的進度 */
-  #setup {
+  /* 首次啟動抓 yt-dlp 與 ffmpeg 時的進度；有新版時的提示也用同一條 */
+  #setup, #update-bar {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -139,6 +139,10 @@
     font-size: 12px;
     color: var(--dim);
   }
+
+  #update-bar { justify-content: space-between; }
+  /* display:flex 會蓋過 hidden 屬性的預設樣式，得明講 */
+  #setup[hidden], #update-bar[hidden] { display: none; }
 
   #setup .meter {
     flex: 1;
@@ -527,6 +531,11 @@
   <div class="meter"><i id="setup-fill"></i></div>
 </div>
 
+<div id="update-bar" hidden>
+  <span id="update-text"></span>
+  <button type="button" id="update-go" class="primary">更新並重新啟動</button>
+</div>
+
 <div id="queue">
   <p class="empty" id="empty">佇列是空的。貼上連結就會開始下載。</p>
   <h2 class="group" id="active-h" hidden>進行中</h2>
@@ -606,6 +615,7 @@
     <fieldset>
       <legend>工具</legend>
       <button type="button" id="update" title="各站改版時靠這個跟上">更新 yt-dlp</button>
+      <button type="button" id="update-app" title="從 GitHub Releases 取得新版">檢查 Haul 更新</button>
     </fieldset>
 
     <div class="sheet-actions">
@@ -1108,11 +1118,45 @@
     } catch (e) { say('存不了設定：' + String(e), true); }
   });
 
+  // ---------------------------------------------------------- 自我更新
+
+  const updateBar = $('update-bar'), updateText = $('update-text'), updateGo = $('update-go');
+
+  // 啟動時靜靜查一次；設定面板手動按的才把「沒有新版／失敗」講出來
+  async function checkUpdate(manual) {
+    try {
+      const u = await invoke('check_update');
+      if (u) {
+        updateText.textContent = `有新版本 v${u.version}`;
+        updateBar.hidden = false;
+        if (manual) dlg.close();
+      } else if (manual) {
+        say('Haul 已是最新版', false);
+      }
+    } catch (e) {
+      if (manual) say('檢查更新失敗：' + String(e), true);
+    }
+  }
+  updateGo.addEventListener('click', async () => {
+    updateGo.disabled = true;
+    updateText.textContent = '正在下載更新…';
+    try { await invoke('install_update'); }   // 成功就重新啟動，不會回來
+    catch (e) { updateText.textContent = '更新失敗：' + String(e); updateGo.disabled = false; }
+  });
+  listen('update', e => {
+    const { bytes, total } = e.payload;
+    updateText.textContent = total
+      ? `正在下載更新 ${mb(bytes)} / ${mb(total)}`
+      : `正在下載更新 ${mb(bytes)}`;
+  });
+  $('update-app').addEventListener('click', () => checkUpdate(true));
+
   (async () => {
     settings = await invoke('get_settings');
     document.getElementById('dest').textContent = await invoke('out_dir');
     reset(await invoke('snapshot'));
     input.focus();
+    checkUpdate(false);
   })();
 })();
 </script>
