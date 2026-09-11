@@ -7,9 +7,15 @@
 //! pagehide 先停下來，已收到的 chunk 照收尾。
 
 
-use anyhow::{bail, Result};
+use super::cdp::Cdp;
+use anyhow::{anyhow, bail, Result};
+use base64::Engine as _;
+use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::watch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
@@ -228,6 +234,194 @@ pub async fn remux(
     Ok(())
 }
 
+pub struct Recorded {
+    pub stop: Stop,
+    pub bytes: u64,
+    pub secs: u64,
+    pub mime: String,
+    pub title: String,
+}
+
+/// 目標分頁載入後等多久再注入。不等完全載完 —— 直播頁永遠載不完。
+const SETTLE: Duration = Duration::from_millis(1500);
+
+/// 開目標分頁、在裡面錄到某個停止條件成立。chunk 邊收邊寫進 `dest`。
+///
+/// `stop` 是外部的停止訊號（GUI 按鈕、CLI Ctrl-C）。`progress(bytes, secs)` 每個
+/// chunk 叫一次。
+pub async fn record(
+    cdp: &Arc<Cdp>,
+    url: &str,
+    audio_only: bool,
+    dest: &Path,
+    max: Duration,
+    mut stop: watch::Receiver<bool>,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<Recorded> {
+    let mut events = cdp.subscribe();
+
+    let (target_id, sid) = open(cdp, url).await?;
+    cdp.call(Some(&sid), "Page.enable", json!({})).await?;
+    cdp.call(Some(&sid), "Runtime.enable", json!({})).await?;
+    cdp.call(Some(&sid), "Runtime.addBinding", json!({ "name": "haulRec" }))
+        .await?;
+    tokio::time::sleep(SETTLE).await;
+
+    let title = eval_str(cdp, &sid, "document.title").await.unwrap_or_default();
+    let supported: Vec<String> = eval_str(cdp, &sid, SUPPORTED_JS)
+        .await
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let mime = pick_mime(audio_only, &supported).ok_or_else(|| {
+        anyhow!("這個瀏覽器的 MediaRecorder 不支援任何可用格式（{supported:?}）")
+    })?;
+
+    cdp.call(
+        Some(&sid),
+        "Runtime.evaluate",
+        json!({ "expression": record_js(&mime, audio_only), "userGesture": true }),
+    )
+    .await?;
+
+    let mut file = tokio::fs::File::create(dest).await?;
+    let start = Instant::now();
+    let mut when = StopWhen::new(start, max);
+    let mut bytes = 0u64;
+    let mut started = false;
+    let mut outcome: Option<Stop> = None;
+    let mut told_page = false;
+
+    // 注入後多久內沒有 started 就當失敗——getDisplayMedia 跳了選擇框或被拒
+    const START_TIMEOUT: Duration = Duration::from_secs(15);
+
+    loop {
+        if outcome.is_none() {
+            if let Some(s) = when.check(Instant::now()) {
+                outcome = Some(s);
+            }
+        }
+        if !started && start.elapsed() > START_TIMEOUT {
+            bail!("錄製沒有開始（{}秒內沒收到擷取成功的回報）", START_TIMEOUT.as_secs());
+        }
+        // 叫頁面停；最後一個 chunk 與 stopped 事件會跟著來
+        if outcome.is_some() && !told_page {
+            told_page = true;
+            let _ = cdp
+                .call(
+                    Some(&sid),
+                    "Runtime.evaluate",
+                    json!({ "expression": "window.haulStop && window.haulStop()" }),
+                )
+                .await;
+        }
+
+        let ev = tokio::select! {
+            r = events.recv() => match r {
+                Ok(ev) => ev,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => bail!("瀏覽器連線已關閉"),
+            },
+            _ = stop.changed() => {
+                if *stop.borrow() { when.user_stopped(); }
+                continue;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(500)) => continue,
+        };
+
+        match ev.method.as_str() {
+            "Runtime.bindingCalled" if ev.session_id.as_deref() == Some(sid.as_str()) => {
+                let Ok(msg) =
+                    serde_json::from_str::<Value>(ev.params["payload"].as_str().unwrap_or(""))
+                else {
+                    continue;
+                };
+                match msg["type"].as_str() {
+                    Some("started") => started = true,
+                    Some("chunk") => {
+                        let data = base64::engine::general_purpose::STANDARD
+                            .decode(msg["data"].as_str().unwrap_or(""))
+                            .unwrap_or_default();
+                        bytes += data.len() as u64;
+                        file.write_all(&data).await?;
+                        progress(bytes, start.elapsed().as_secs());
+                    }
+                    Some("playing") => {
+                        when.playing(msg["playing"].as_bool().unwrap_or(false), Instant::now());
+                    }
+                    Some("stopped") => {
+                        // 我們沒下令就停了：藍條的「停止分享」或換頁，算使用者停的
+                        outcome.get_or_insert(Stop::User);
+                        break;
+                    }
+                    Some("error") => {
+                        bail!("錄製失敗：{}", msg["message"].as_str().unwrap_or("?"))
+                    }
+                    _ => {}
+                }
+            }
+            "Target.targetDestroyed"
+                if ev.params["targetId"].as_str() == Some(target_id.as_str()) =>
+            {
+                // 分頁被關：已錄到的照收尾
+                outcome.get_or_insert(Stop::User);
+                break;
+            }
+            _ => {}
+        }
+    }
+    file.flush().await?;
+    drop(file);
+
+    let _ = cdp
+        .call(None, "Target.closeTarget", json!({ "targetId": target_id }))
+        .await;
+
+    if bytes == 0 {
+        bail!("什麼都沒錄到");
+    }
+    Ok(Recorded {
+        stop: outcome.unwrap_or(Stop::User),
+        bytes,
+        secs: start.elapsed().as_secs(),
+        mime,
+        title,
+    })
+}
+
+async fn open(cdp: &Cdp, url: &str) -> Result<(String, String)> {
+    let t = cdp
+        .call(None, "Target.createTarget", json!({ "url": url }))
+        .await?;
+    let tid = t["targetId"]
+        .as_str()
+        .ok_or_else(|| anyhow!("沒有 targetId"))?
+        .to_string();
+    let a = cdp
+        .call(
+            None,
+            "Target.attachToTarget",
+            json!({ "targetId": tid, "flatten": true }),
+        )
+        .await?;
+    let sid = a["sessionId"]
+        .as_str()
+        .ok_or_else(|| anyhow!("沒有 sessionId"))?
+        .to_string();
+    Ok((tid, sid))
+}
+
+async fn eval_str(cdp: &Cdp, sid: &str, expr: &str) -> Option<String> {
+    let r = cdp
+        .call(
+            Some(sid),
+            "Runtime.evaluate",
+            json!({ "expression": expr, "returnByValue": true }),
+        )
+        .await
+        .ok()?;
+    r["result"]["value"].as_str().map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +521,107 @@ mod tests {
     fn output_extension_follows_mode() {
         assert_eq!(output_ext(false), "mp4");
         assert_eq!(output_ext(true), "m4a");
+    }
+
+    /// 用 Haul 自己下載的 ffmpeg 產一支 3 秒的真影片。找不到就略過。
+    fn make_clip(dir: &Path) -> Option<std::path::PathBuf> {
+        let ffmpeg = crate::engine::default_bin_dir().join("ffmpeg");
+        if !ffmpeg.is_file() {
+            return None;
+        }
+        let out = dir.join("clip.mp4");
+        let ok = std::process::Command::new(&ffmpeg)
+            .args([
+                "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
+                "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+            ])
+            .arg(&out)
+            .status()
+            .ok()?
+            .success();
+        ok.then_some(out)
+    }
+
+    /// 一頁自動播放的 <video>。127.0.0.1 是 secure context，getDisplayMedia 可用。
+    fn clip_server(clip: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let page = format!(
+            "<!doctype html><title>Clip</title><video autoplay src=\"{base}/clip.mp4\"></video>"
+        );
+        let h = std::thread::spawn(move || {
+            for _ in 0..32 {
+                let Ok((mut s, _)) = l.accept() else { break };
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let (ct, body): (&str, &[u8]) = if req.contains("/clip.mp4") {
+                    ("video/mp4", &clip)
+                } else {
+                    ("text/html", page.as_bytes())
+                };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(body);
+            }
+        });
+        (base, h)
+    }
+
+    #[tokio::test]
+    async fn records_a_tab_until_its_media_ends() {
+        if std::env::var("HAUL_TEST_CHROME").is_err() {
+            eprintln!("略過：未設 HAUL_TEST_CHROME");
+            return;
+        }
+        let dir = std::env::temp_dir().join("haul-record-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let Some(clip) = make_clip(&dir) else {
+            eprintln!("略過：沒有 ffmpeg");
+            return;
+        };
+        let (base, _srv) = clip_server(std::fs::read(&clip).unwrap());
+
+        let exe = super::super::chrome::find(None).unwrap();
+        let ch = super::super::chrome::launch(&exe, &std::env::temp_dir().join("haul-chrome-test"))
+            .await
+            .unwrap();
+        let cdp = Cdp::connect(&ch.ws_url).await.unwrap();
+
+        let webm = dir.join("rec.webm");
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let mut last = (0u64, 0u64);
+        let out = record(
+            &cdp,
+            &format!("{base}/"),
+            false,
+            &webm,
+            Duration::from_secs(60),
+            stop_rx,
+            |bytes, secs| last = (bytes, secs),
+        )
+        .await
+        .unwrap();
+        let _ = cdp.call(None, "Browser.close", json!({})).await;
+
+        assert_eq!(out.stop, Stop::MediaEnded, "3 秒的片播完應該自動停");
+        assert!(out.bytes > 10_240, "只有 {} bytes", out.bytes);
+        assert!(webm.is_file());
+        assert!(last.0 > 0 && last.1 >= 3, "進度回呼：{last:?}");
+        assert_eq!(out.title, "Clip");
+        assert!(out.mime.contains("h264"), "{}", out.mime);
+
+        // 轉封裝也真的跑一次，確認 ffmpeg 吃得下 MediaRecorder 的 WebM
+        let ffmpeg = crate::engine::default_bin_dir().join("ffmpeg");
+        let mp4 = dir.join("rec.mp4");
+        remux(&ffmpeg, &webm, &mp4, false, &out.mime).await.unwrap();
+        assert!(std::fs::metadata(&mp4).unwrap().len() > 10_240);
     }
 }
 
