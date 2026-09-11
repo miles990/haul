@@ -10,6 +10,7 @@ use crate::direct;
 use crate::extract::{self, Mode, Probe};
 use crate::gallery;
 use crate::log::Logger;
+use crate::thumb;
 use crate::tools::{self, Tools};
 use crate::verify;
 
@@ -57,6 +58,9 @@ pub struct Item {
     /// 兩個問題：verified 講前者，這裡講後者。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// 縮圖的完整路徑（`.haul-thumbs/` 裡）。沒有就是產不出來（無封面的音樂、PDF）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -305,6 +309,54 @@ impl Engine {
         self.items.lock().unwrap().clone()
     }
 
+    /// 確認或補產一個完成項目的縮圖，回傳縮圖路徑。
+    ///
+    /// 舊項目（更新前下載的）沒有縮圖，第一次顯示時從原檔補一張；
+    /// 縮圖檔名由原檔路徑決定，所以不必寫回歷史——下次啟動看檔案在不在就好。
+    /// 原檔已不在時回 Err，GUI 據此把那列標成「檔案已不在」。
+    pub async fn ensure_thumb(&self, id: u64) -> Result<Option<PathBuf>, String> {
+        let (path, kind, level, secs, thumb) = {
+            let g = self.items.lock().unwrap();
+            let it = g.iter().find(|i| i.id == id).ok_or("沒有這個項目")?;
+            if it.status != "done" {
+                return Err("還沒完成".into());
+            }
+            (
+                it.path.clone().ok_or("沒有檔案")?,
+                it.kind.clone(),
+                it.verified.clone(),
+                it.secs,
+                it.thumb.clone(),
+            )
+        };
+        let media = PathBuf::from(&path);
+        if !media.is_file() {
+            return Err("檔案已不在".into());
+        }
+        if let Some(t) = thumb.as_deref().map(PathBuf::from).filter(|p| p.is_file()) {
+            return Ok(Some(t));
+        }
+        let level = match level.as_deref() {
+            Some("media") => verify::Level::Media,
+            Some("image") => verify::Level::Image,
+            _ => return Ok(None),
+        };
+        let dest = thumb::path_for(&self.cfg.out_dir, &media);
+        let got = if dest.is_file() {
+            Some(dest)
+        } else {
+            let tools = self.tools().await?;
+            thumb::make(&tools.ffmpeg, &media, thumb_seek(&kind, level, secs), &dest)
+                .await
+                .map_err(|e| e.to_string())?
+        };
+        if let Some(p) = &got {
+            let s = p.to_string_lossy().to_string();
+            self.update(id, |i| i.thumb = Some(s));
+        }
+        Ok(got)
+    }
+
     /// 移除已完成與失敗的項目，回傳剩下的
     pub fn clear_finished(&self) -> Vec<Item> {
         let mut g = self.items.lock().unwrap();
@@ -333,6 +385,7 @@ impl Engine {
             can_browser: false,
             can_record: false,
             source: None,
+            thumb: None,
         };
         let id = item.id;
         self.items.lock().unwrap().push(item.clone());
@@ -540,11 +593,7 @@ impl Engine {
         mode: Mode,
         opts: extract::Options,
     ) -> Vec<JoinHandle<()>> {
-        let kind = if mode == Mode::Audio {
-            "audio"
-        } else {
-            "video"
-        };
+        let kind = kind_for(mode);
         let id = self.push(input.clone(), short(&input), kind);
         self.update(id, |i| i.status = "resolving".into());
 
@@ -894,6 +943,32 @@ impl Engine {
             .map(|m| m.len())
             .unwrap_or(0);
 
+        // 縮圖：產不出來不影響完成
+        let thumb = if wants_thumb(level) {
+            let kind = self
+                .items
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.id == id)
+                .map(|i| i.kind.clone())
+                .unwrap_or_default();
+            let seek = thumb_seek(&kind, level, reported.or(secs));
+            let thumb_dest = thumb::path_for(&self.cfg.out_dir, &dest);
+            match thumb::make(&tools.ffmpeg, &dest, seek, &thumb_dest).await {
+                Ok(p) => p.map(|p| p.to_string_lossy().to_string()),
+                Err(e) => {
+                    self.log.warn(
+                        "thumb.failed",
+                        serde_json::json!({ "id": id, "error": e.to_string() }),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         self.log.info(
             "item.done",
             serde_json::json!({
@@ -902,6 +977,7 @@ impl Engine {
                 "bytes": size,
                 "secs": reported.or(secs),
                 "verified": level.as_str(),
+                "thumb": thumb,
             }),
         );
 
@@ -914,6 +990,7 @@ impl Engine {
             i.bytes = size;
             i.total = size;
             i.error = None;
+            i.thumb = thumb;
         });
     }
 
@@ -1519,6 +1596,25 @@ fn sweep(staging: &Path) {
     }
 }
 
+/// 項目的 kind 直接對應模式，重試時 `Mode::parse(kind)` 才拿得回同一個模式
+fn kind_for(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Video => "video",
+        Mode::Audio => "audio",
+        Mode::Image => "image",
+    }
+}
+
+fn wants_thumb(level: verify::Level) -> bool {
+    matches!(level, verify::Level::Media | verify::Level::Image)
+}
+
+/// 影片抽 2% 處那格（跟影片抽樣驗證的第一個點相同）；
+/// 音樂抽封面、圖片就是圖片，不用 seek
+fn thumb_seek(kind: &str, level: verify::Level, secs: Option<f64>) -> Option<f64> {
+    (kind == "video" && level == verify::Level::Media).then(|| secs.unwrap_or(0.0) * 0.02)
+}
+
 pub fn short(s: &str) -> String {
     let t = s.trim_end_matches('/').rsplit('/').next().unwrap_or(s);
     t.chars().take(28).collect()
@@ -1777,6 +1873,67 @@ mod tests {
         assert_eq!(eng.record_max().as_secs(), 600);
         eng.set_browser_path(Some(std::path::PathBuf::from("/x/chrome")));
         assert_eq!(eng.browser_path(), Some(std::path::PathBuf::from("/x/chrome")));
+    }
+
+    fn sample_item() -> Item {
+        Item {
+            id: 7,
+            input: "https://x/y".into(),
+            title: "y".into(),
+            kind: "video".into(),
+            status: "done".into(),
+            bytes: 1,
+            total: 1,
+            secs: Some(3.0),
+            file: Some("y.mp4".into()),
+            verified: Some("media".into()),
+            path: Some("/out/y.mp4".into()),
+            error: None,
+            can_browser: false,
+            can_record: false,
+            source: None,
+            thumb: None,
+        }
+    }
+
+    #[test]
+    fn kind_follows_mode_so_retries_keep_it() {
+        assert_eq!(kind_for(Mode::Video), "video");
+        assert_eq!(kind_for(Mode::Audio), "audio");
+        // 之前圖片模式記成 video，重試時就變成抓影片
+        assert_eq!(kind_for(Mode::Image), "image");
+        assert_eq!(Mode::parse(kind_for(Mode::Image)), Mode::Image);
+    }
+
+    #[test]
+    fn thumb_seek_only_for_video_media() {
+        use verify::Level;
+        assert_eq!(thumb_seek("video", Level::Media, Some(100.0)), Some(2.0));
+        assert_eq!(thumb_seek("video", Level::Media, None), Some(0.0));
+        assert_eq!(thumb_seek("audio", Level::Media, Some(100.0)), None);
+        assert_eq!(thumb_seek("image", Level::Image, None), None);
+    }
+
+    #[test]
+    fn only_media_and_images_get_thumbs() {
+        use verify::Level;
+        assert!(wants_thumb(Level::Media));
+        assert!(wants_thumb(Level::Image));
+        assert!(!wants_thumb(Level::Archive));
+        assert!(!wants_thumb(Level::Text));
+    }
+
+    #[test]
+    fn history_round_trips_thumb() {
+        let mut it = sample_item();
+        it.thumb = Some("/out/.haul-thumbs/x.jpg".into());
+        let line = serde_json::to_string(&it).unwrap();
+        let back: Item = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.thumb.as_deref(), Some("/out/.haul-thumbs/x.jpg"));
+        // 舊的歷史行沒有 thumb 也要讀得起來
+        let old = line.replace(",\"thumb\":\"/out/.haul-thumbs/x.jpg\"", "");
+        assert_ne!(old, line, "替換前提：thumb 欄位真的在那一行裡");
+        assert!(serde_json::from_str::<Item>(&old).unwrap().thumb.is_none());
     }
 
     #[test]
