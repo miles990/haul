@@ -83,35 +83,68 @@ fn restrict(path: &Path) {
     let _ = path;
 }
 
+/// Netscape cookie 檔的一列。
+#[derive(Clone, Debug)]
+pub struct Cookie {
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    /// Unix 秒；None 代表 session cookie
+    pub expires: Option<u64>,
+    pub name: String,
+    pub value: String,
+}
+
+pub fn parse_netscape(file: &Path) -> Vec<Cookie> {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            // #HttpOnly_ 開頭的是真的 cookie，其餘 # 開頭才是註解
+            let (http_only, line) = match line.strip_prefix("#HttpOnly_") {
+                Some(rest) => (true, rest),
+                None => (false, line),
+            };
+            if line.starts_with('#') || line.trim().is_empty() {
+                return None;
+            }
+            let mut f = line.split('\t');
+            let domain = f.next()?.to_string();
+            let _flag = f.next()?;
+            let path = f.next()?.to_string();
+            let secure = f.next()?.eq_ignore_ascii_case("TRUE");
+            let expires = f.next()?.parse::<u64>().ok().filter(|&e| e > 0);
+            let name = f.next()?.to_string();
+            let value = f.next().unwrap_or("").to_string();
+            Some(Cookie {
+                domain,
+                path,
+                secure,
+                http_only,
+                expires,
+                name,
+                value,
+            })
+        })
+        .collect()
+}
+
 /// 從 Netscape cookie 檔組出某個主機能用的 Cookie 標頭。
 ///
 /// 找不到對應的 cookie 回 None —— 沒有 cookie 跟空的 Cookie 標頭意思不同，
 /// 後者有些伺服器會當成「明確表示沒有 session」。
 pub fn header_for_host(file: &Path, host: &str) -> Option<String> {
-    let text = std::fs::read_to_string(file).ok()?;
     let host = host.to_ascii_lowercase();
-
-    let pairs: Vec<String> = text
-        .lines()
-        .filter_map(|line| {
-            // #HttpOnly_ 開頭的是真的 cookie，其餘 # 開頭才是註解
-            let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
-            if line.starts_with('#') || line.trim().is_empty() {
-                return None;
-            }
-            let mut f = line.split('\t');
-            let domain = f.next()?.trim_start_matches('.').to_ascii_lowercase();
-            let _flag = f.next()?;
-            let _path = f.next()?;
-            let _secure = f.next()?;
-            let _expires = f.next()?;
-            let name = f.next()?;
-            let value = f.next().unwrap_or("");
-
+    let pairs: Vec<String> = parse_netscape(file)
+        .into_iter()
+        .filter(|c| {
             // domain 完全相同，或是它的子網域
-            let matches = host == domain || host.ends_with(&format!(".{domain}"));
-            matches.then(|| format!("{name}={value}"))
+            let domain = c.domain.trim_start_matches('.').to_ascii_lowercase();
+            host == domain || host.ends_with(&format!(".{domain}"))
         })
+        .map(|c| format!("{}={}", c.name, c.value))
         .collect();
 
     (!pairs.is_empty()).then(|| pairs.join("; "))
@@ -199,6 +232,26 @@ mod tests {
         // #HttpOnly_ 開頭的是真 cookie 不是註解
         assert!(h.contains("token=xyz"));
         assert!(!h.contains("nope"));
+    }
+
+    #[test]
+    fn parses_netscape_rows_into_structs() {
+        let f = write(
+            "c3.txt",
+            "# Netscape HTTP Cookie File\n\
+             .example.com\tTRUE\t/\tTRUE\t1800000000\tsess\tabc\n\
+             #HttpOnly_.example.com\tTRUE\t/api\tFALSE\t0\ttoken\txyz\n",
+        );
+        let rows = parse_netscape(&f);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].domain, ".example.com");
+        assert!(rows[0].secure);
+        assert_eq!(rows[0].expires, Some(1_800_000_000));
+        assert_eq!(rows[1].path, "/api");
+        assert!(rows[1].http_only);
+        // 0 是 session cookie，不是「1970 年就過期」
+        assert_eq!(rows[1].expires, None);
+        assert_eq!((rows[1].name.as_str(), rows[1].value.as_str()), ("token", "xyz"));
     }
 
     #[test]
