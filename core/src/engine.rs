@@ -1752,6 +1752,35 @@ pub fn open_with_system(target: &Path) -> Result<(), String> {
         .map_err(|e| format!("開啟失敗：{e}"))
 }
 
+/// 在 Finder／檔案總管裡選取這個檔案。想搬、想刪、想改名時一步跳到
+/// 真正的檔案管理器——Haul 只管下載，不做媒體庫。
+pub fn reveal_in_folder(out_dir: &Path, path: &str) -> Result<(), String> {
+    let target = validate_playable(out_dir, path)?;
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(&target);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        // /select, 後面直接接路徑，不能分成兩個參數
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", target.display()));
+        c
+    };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut cmd = {
+        // Linux 沒有跨桌面環境的「選取檔案」，開所在資料夾就好
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(target.parent().unwrap_or(&target));
+        c
+    };
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("開啟失敗：{e}"))
+}
+
 pub fn home_dir() -> PathBuf {
     #[cfg(windows)]
     let v = std::env::var_os("USERPROFILE");
@@ -1934,6 +1963,13 @@ mod tests {
         let old = line.replace(",\"thumb\":\"/out/.haul-thumbs/x.jpg\"", "");
         assert_ne!(old, line, "替換前提：thumb 欄位真的在那一行裡");
         assert!(serde_json::from_str::<Item>(&old).unwrap().thumb.is_none());
+    }
+
+    #[test]
+    fn reveal_refuses_paths_outside_the_download_folder() {
+        let root = std::env::temp_dir().join("haul-reveal-test");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(reveal_in_folder(&root, "/nope/x.mp4").is_err());
     }
 
     #[test]

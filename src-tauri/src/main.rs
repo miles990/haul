@@ -8,8 +8,8 @@
 
 use haul_core::settings::Settings;
 use haul_core::{
-    default_bin_dir, default_out_dir, open_with_system, validate_playable, Config, Engine, Event,
-    Item, Mode, Options,
+    default_bin_dir, default_out_dir, open_with_system, reveal_in_folder, validate_playable,
+    Config, Engine, Event, Item, Mode, Options,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -99,6 +99,24 @@ fn open_out_dir(state: State<'_, Arc<Engine>>) -> Result<(), String> {
 fn open_file(state: State<'_, Arc<Engine>>, path: String) -> Result<(), String> {
     let target = validate_playable(state.out_dir(), &path)?;
     open_with_system(&target)
+}
+
+/// 在 Finder／檔案總管裡選取一個下載好的檔案。路徑同樣要先驗證。
+#[tauri::command]
+fn reveal_file(state: State<'_, Arc<Engine>>, path: String) -> Result<(), String> {
+    reveal_in_folder(state.out_dir(), &path)
+}
+
+/// 完成項目的縮圖，base64 JPEG。前端只傳 id，不傳路徑，也不開 asset protocol。
+/// Ok(None) = 這個項目沒有縮圖（無封面的音樂、PDF）；Err = 原檔已不在等。
+#[tauri::command]
+async fn thumb(state: State<'_, Arc<Engine>>, id: u64) -> Result<Option<String>, String> {
+    use base64::Engine as _;
+    let Some(p) = state.ensure_thumb(id).await? else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+    Ok(Some(base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 #[tauri::command]
@@ -350,6 +368,8 @@ fn main() {
             out_dir,
             open_out_dir,
             open_file,
+            reveal_file,
+            thumb,
             clear_done,
             update_tools,
             retry_with_browser,

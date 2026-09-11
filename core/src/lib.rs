@@ -17,7 +17,7 @@ pub mod verify;
 
 pub use engine::{
     default_bin_dir, default_log_dir, default_out_dir, home_dir, load_history, open_with_system,
-    sanitize, validate_playable, Config, Engine, Event, Item, Sink,
+    reveal_in_folder, sanitize, validate_playable, Config, Engine, Event, Item, Sink,
 };
 pub use extract::{Mode, Options};
 pub use tools::Tools;
