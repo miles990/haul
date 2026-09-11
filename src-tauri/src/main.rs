@@ -110,6 +110,27 @@ async fn update_tools(app: AppHandle) -> Result<String, String> {
     engine(&app).update_tools().await
 }
 
+/// 萃取失敗的項目改用瀏覽器抓。偵測與下載都很久，不等它，狀態走事件回來。
+#[tauri::command]
+fn retry_with_browser(app: AppHandle, id: u64) {
+    let eng = engine(&app);
+    tauri::async_runtime::spawn(async move { eng.retry_with_browser(id).await });
+}
+
+/// 使用者從候選清單挑了另一個：新增一個項目抓它
+#[tauri::command]
+async fn add_candidate(
+    app: AppHandle,
+    id: u64,
+    candidate: haul_core::browser::sniff::Candidate,
+) -> Result<(), String> {
+    engine(&app)
+        .add_candidate(id, candidate)
+        .await
+        .map(|_| ())
+        .ok_or_else(|| "找不到原始項目，或工具尚未就緒".to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -180,7 +201,9 @@ fn main() {
             open_out_dir,
             open_file,
             clear_done,
-            update_tools
+            update_tools,
+            retry_with_browser,
+            add_candidate
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 啟動失敗");

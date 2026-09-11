@@ -278,6 +278,59 @@
     user-select: text;
   }
 
+  /* 萃取失敗但瀏覽器可能救得了：給一顆安靜的行內按鈕，不彈視窗、不自動接手 */
+  .act {
+    grid-column: 1 / -1;
+    grid-row: 4;
+    justify-self: start;
+    margin-top: 4px;
+    padding: 3px 9px;
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    background: var(--panel);
+    color: var(--dim);
+    font: 500 12px/1.4 var(--sans);
+    cursor: pointer;
+  }
+  .act:hover { color: var(--ink); background: #2b3138; }
+
+  /* 瀏覽器偵測到的候選。自動挑的那個標出來，其餘可以另外抓 */
+  .cands {
+    grid-column: 1 / -1;
+    grid-row: 5;
+    margin-top: 4px;
+    font-size: 11.5px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .cand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+  }
+  .cand .url {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl; /* 網址尾巴比開頭有資訊，截開頭不截尾 */
+    text-align: left;
+    flex: 1;
+  }
+  .cand .pick {
+    padding: 1px 7px;
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--dim);
+    font: 11px/1.4 var(--sans);
+    cursor: pointer;
+  }
+  .cand .pick:hover { color: var(--ink); }
+  .cand.on { color: var(--lamp); }
+
+  .track[data-status="browser"] .meter > i { width: 100%; opacity: 0.25; }
+
   /* ---------------------------------------------------------- 狀態列 */
 
   footer {
@@ -373,6 +426,7 @@
   const LABEL = {
     queued:      '等候中',
     resolving:   '解析中',
+    browser:     '瀏覽器偵測中 · 頁面要按播放的話請在視窗裡按',
     downloading: '下載中',
     verifying:   '驗證中',
   };
@@ -390,6 +444,8 @@
         return it.total
           ? `${mb(it.bytes)} / ${mb(it.total)}`
           : mb(it.bytes);
+      case 'browser':
+        return it.total ? `偵測到 ${it.total} 個媒體` : LABEL.browser;
       case 'done':
         return it.secs ? `已驗證 · ${clock(it.secs)}` : '已驗證';
       case 'failed':
@@ -406,13 +462,22 @@
       '<span class="name"></span>' +
       '<span class="stat"></span>' +
       '<div class="meter"><i></i></div>' +
-      '<span class="why"></span>';
+      '<span class="why"></span>' +
+      '<button type="button" class="act" hidden>用瀏覽器抓</button>' +
+      '<div class="cands" hidden></div>';
     const refs = {
       name:  el.querySelector('.name'),
       stat:  el.querySelector('.stat'),
       fill:  el.querySelector('.meter > i'),
       why:   el.querySelector('.why'),
+      act:   el.querySelector('.act'),
+      cands: el.querySelector('.cands'),
     };
+    refs.act.addEventListener('click', ev => {
+      ev.stopPropagation();
+      refs.act.disabled = true;
+      invoke('retry_with_browser', { id: it.id }).catch(err => say(String(err), true));
+    });
     queue.appendChild(el);
     return { el, refs };
   }
@@ -441,6 +506,14 @@
 
     refs.why.textContent = it.status === 'failed' ? (it.error || '') : '';
     refs.why.hidden = it.status !== 'failed';
+
+    // 只有萃取類的失敗才給這顆；401 / 429 / 驗證失敗開瀏覽器也救不了
+    refs.act.hidden = !(it.status === 'failed' && it.canBrowser);
+    refs.act.disabled = false;
+    if (it.status !== 'browser' && it.status !== 'downloading' &&
+        it.status !== 'verifying' && it.status !== 'done') {
+      refs.cands.hidden = true;
+    }
 
     empty.hidden = rows.size > 0;
     updateTally();
@@ -549,13 +622,46 @@
   const setupFill = document.getElementById('setup-fill');
 
   // 已經動用到 yt-dlp / ffmpeg 的狀態。resolving 不算 —— 那時工具可能還在下載。
-  const NEEDS_TOOLS = new Set(['downloading', 'verifying', 'done']);
+  const NEEDS_TOOLS = new Set(['browser', 'downloading', 'verifying', 'done']);
 
   listen('item', e => {
     paint(e.payload);
     // 走到這些狀態就代表工具已經就緒。單靠 done 事件的話，只要那則事件
     // 沒送到（例如被進度事件淹沒），進度列就會永遠留在畫面上。
     if (NEEDS_TOOLS.has(e.payload.status)) setup.hidden = true;
+  });
+
+  const kb = n => n == null ? '' : (n >= 1048576 ? mb(n) : (n / 1024).toFixed(0) + ' KB');
+
+  // 瀏覽器偵測到的候選：自動挑的標「已選」，其餘給「抓這個」——
+  // 那會新增一個項目，不會取消正在跑的
+  listen('candidates', e => {
+    const { id, candidates, chosen } = e.payload;
+    const row = rows.get(id);
+    if (!row) return;
+    const box = row.refs.cands;
+    box.textContent = '';
+    candidates.forEach((c, i) => {
+      const line = document.createElement('div');
+      line.className = 'cand' + (i === chosen ? ' on' : '');
+      const kind = c.kind === 'manifest' ? '串流清單' : '單檔';
+      line.innerHTML =
+        `<span>${i === chosen ? '已選' : '　　'}</span>` +
+        `<span>${kind}</span>` +
+        `<span>${kb(c.size)}</span>` +
+        `<span class="url"></span>` +
+        (i === chosen ? '' : '<button type="button" class="pick">抓這個</button>');
+      line.querySelector('.url').textContent = c.url;
+      line.querySelector('.url').title = c.url;
+      const pick = line.querySelector('.pick');
+      if (pick) pick.addEventListener('click', ev => {
+        ev.stopPropagation();
+        pick.disabled = true;
+        invoke('add_candidate', { id, candidate: c }).catch(err => say(String(err), true));
+      });
+      box.appendChild(line);
+    });
+    box.hidden = candidates.length === 0;
   });
 
   listen('setup', e => {
