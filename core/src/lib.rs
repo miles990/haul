@@ -3,6 +3,7 @@
 //! GUI 與 CLI 都只是這個 crate 的外殼：引擎透過 `Sink` 回呼把事件送出去，
 //! 兩邊各自決定要轉成 Tauri event 還是 NDJSON。行為只有一份，不會分岔。
 
+pub mod browser;
 pub mod cookies;
 pub mod direct;
 pub mod engine;
