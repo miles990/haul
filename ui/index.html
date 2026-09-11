@@ -583,34 +583,34 @@
 
 <section class="intake">
   <div class="field" id="field">
-    <textarea id="input" spellcheck="false"
+    <textarea id="input" spellcheck="false" data-i18n-placeholder="input.placeholder"
       placeholder="貼上影片、音樂或圖片的連結，一行一個"></textarea>
     <div class="row-actions">
-      <div class="modes" role="radiogroup" aria-label="要下載什麼">
-        <button type="button" class="mode on" data-mode="video" role="radio" aria-checked="true">影片</button>
-        <button type="button" class="mode" data-mode="audio" role="radio" aria-checked="false">只要聲音</button>
-        <button type="button" class="mode" data-mode="image" role="radio" aria-checked="false"
-          title="影片連結抓封面圖；圖片網址直接抓；圖庫頁需要 gallery-dl">圖片</button>
+      <div class="modes" role="radiogroup" data-i18n-aria-label="modes.label" aria-label="要下載什麼">
+        <button type="button" class="mode on" data-mode="video" role="radio" aria-checked="true" data-i18n="mode.video">影片</button>
+        <button type="button" class="mode" data-mode="audio" role="radio" aria-checked="false" data-i18n="mode.audio">只要聲音</button>
+        <button type="button" class="mode" data-mode="image" role="radio" aria-checked="false" data-i18n="mode.image"
+          data-i18n-title="mode.image.title" title="影片連結抓封面圖；圖片網址直接抓；圖庫頁需要 gallery-dl">圖片</button>
       </div>
-      <button class="primary" id="go">加入佇列</button>
+      <button class="primary" id="go" data-i18n="go">加入佇列</button>
     </div>
   </div>
-  <p class="hint" id="hint">單支或整份清單都可以</p>
+  <p class="hint" id="hint" data-i18n="hint.default">單支或整份清單都可以</p>
 </section>
 
 <div id="setup" hidden>
-  <span id="setup-text">正在準備下載工具…</span>
+  <span id="setup-text" data-i18n="setup.preparing">正在準備下載工具…</span>
   <div class="meter"><i id="setup-fill"></i></div>
 </div>
 
 <div id="update-bar" hidden>
   <span id="update-text"></span>
-  <button type="button" id="update-go" class="primary">更新並重新啟動</button>
+  <button type="button" id="update-go" class="primary" data-i18n="update.go">更新並重新啟動</button>
 </div>
 
 <nav class="tabs" role="tablist">
-  <button type="button" class="tab on" data-tab="active" role="tab" aria-selected="true">佇列 <b id="n-active">0</b></button>
-  <button type="button" class="tab" data-tab="done" role="tab" aria-selected="false">已完成 <b id="n-done">0</b></button>
+  <button type="button" class="tab on" data-tab="active" role="tab" aria-selected="true"><span data-i18n="tab.active">佇列</span> <b id="n-active">0</b></button>
+  <button type="button" class="tab" data-tab="done" role="tab" aria-selected="false"><span data-i18n="tab.done">已完成</span> <b id="n-done">0</b></button>
 </nav>
 
 <div id="queue">
@@ -622,49 +622,60 @@
 <footer>
   <span id="dest">—</span>
   <span id="tally"></span>
-  <button id="gear" title="設定">⚙</button>
-  <button id="reveal">開啟資料夾</button>
-  <button id="clear">清掉已完成</button>
+  <button id="gear" data-i18n-title="settings.title" title="設定">⚙</button>
+  <button id="reveal" data-i18n="footer.openFolder">開啟資料夾</button>
+  <button id="clear" data-i18n="footer.clearDone">清掉已完成</button>
 </footer>
 
 <dialog id="settings">
   <form method="dialog" class="sheet">
-    <h2>設定</h2>
+    <h2 data-i18n="settings.title">設定</h2>
 
     <fieldset>
-      <legend>下載</legend>
-      <label class="pathrow">輸出資料夾
-        <span id="set-out" class="path">預設</span>
-        <button type="button" id="set-out-pick">選擇…</button>
-        <span class="note">重新啟動後生效</span>
+      <legend data-i18n="set.ui">介面</legend>
+      <label><span data-i18n="set.language">語言</span>
+        <select id="set-lang">
+          <option value="" data-i18n="lang.system">跟隨系統</option>
+          <option value="zh-TW">繁體中文</option>
+          <option value="en">English</option>
+        </select>
       </label>
-      <label>畫質上限
+    </fieldset>
+
+    <fieldset>
+      <legend data-i18n="set.download">下載</legend>
+      <label class="pathrow"><span data-i18n="set.outDir">輸出資料夾</span>
+        <span id="set-out" class="path">預設</span>
+        <button type="button" id="set-out-pick" data-i18n="set.choose">選擇…</button>
+        <span class="note" data-i18n="set.restart">重新啟動後生效</span>
+      </label>
+      <label><span data-i18n="set.quality">畫質上限</span>
         <select id="set-quality">
-          <option value="">不設限</option>
+          <option value="" data-i18n="set.noLimit">不設限</option>
           <option value="2160">2160p</option>
           <option value="1440">1440p</option>
           <option value="1080">1080p</option>
           <option value="720">720p</option>
         </select>
       </label>
-      <label>同時下載數
+      <label><span data-i18n="set.concurrency">同時下載數</span>
         <input type="number" id="set-concurrency" min="1" max="8">
-        <span class="note">重新啟動後生效</span>
+        <span class="note" data-i18n="set.restart">重新啟動後生效</span>
       </label>
-      <label class="check"><input type="checkbox" id="set-chime-on"> 佇列完成時播放提示音</label>
+      <label class="check"><input type="checkbox" id="set-chime-on"> <span data-i18n="set.chime">佇列完成時播放提示音</span></label>
       <div class="pathrow" id="chime-file-row">
         <span id="set-chime-file" class="path">內建提示音</span>
-        <button type="button" id="chime-pick">選檔…</button>
-        <button type="button" id="chime-clear">改回內建</button>
-        <button type="button" id="chime-test">試聽</button>
+        <button type="button" id="chime-pick" data-i18n="set.chooseFile">選檔…</button>
+        <button type="button" id="chime-clear" data-i18n="set.chimeBuiltinBtn">改回內建</button>
+        <button type="button" id="chime-test" data-i18n="set.chimeTest">試聽</button>
       </div>
     </fieldset>
 
     <fieldset>
-      <legend>登入</legend>
-      <label>登入狀態來源
+      <legend data-i18n="set.login">登入</legend>
+      <label><span data-i18n="set.cookies">登入狀態來源</span>
         <select id="set-cookies">
-          <option value="">不用登入</option>
+          <option value="" data-i18n="set.noLogin">不用登入</option>
           <option value="chrome">Chrome</option>
           <option value="firefox">Firefox</option>
           <option value="safari">Safari</option>
@@ -672,30 +683,30 @@
           <option value="brave">Brave</option>
         </select>
       </label>
-      <p class="note">Haul 不碰帳密，只借用瀏覽器已有的登入狀態。</p>
+      <p class="note" data-i18n="set.cookiesNote">Haul 不碰帳密，只借用瀏覽器已有的登入狀態。</p>
     </fieldset>
 
     <fieldset>
-      <legend>瀏覽器 / 錄製</legend>
-      <label class="pathrow">瀏覽器路徑
+      <legend data-i18n="set.browser">瀏覽器 / 錄製</legend>
+      <label class="pathrow"><span data-i18n="set.browserPath">瀏覽器路徑</span>
         <span id="set-browser" class="path">自動偵測</span>
-        <button type="button" id="browser-pick">選擇…</button>
-        <button type="button" id="browser-clear">自動</button>
+        <button type="button" id="browser-pick" data-i18n="set.choose">選擇…</button>
+        <button type="button" id="browser-clear" data-i18n="set.auto">自動</button>
       </label>
-      <label>錄製上限（分鐘）
+      <label><span data-i18n="set.recordMax">錄製上限（分鐘）</span>
         <input type="number" id="set-record-max" min="1">
       </label>
     </fieldset>
 
     <fieldset>
-      <legend>工具</legend>
-      <button type="button" id="update" title="各站改版時靠這個跟上">更新 yt-dlp</button>
-      <button type="button" id="update-app" title="從 GitHub Releases 取得新版">檢查 Haul 更新</button>
+      <legend data-i18n="set.tools">工具</legend>
+      <button type="button" id="update" data-i18n="set.updateYtdlp" data-i18n-title="set.updateYtdlp.title" title="各站改版時靠這個跟上">更新 yt-dlp</button>
+      <button type="button" id="update-app" data-i18n="set.updateApp" data-i18n-title="set.updateApp.title" title="從 GitHub Releases 取得新版">檢查 Haul 更新</button>
     </fieldset>
 
     <div class="sheet-actions">
-      <button type="button" id="set-cancel">取消</button>
-      <button type="button" id="set-save" class="primary">儲存</button>
+      <button type="button" id="set-cancel" data-i18n="set.cancel">取消</button>
+      <button type="button" id="set-save" class="primary" data-i18n="set.save">儲存</button>
     </div>
   </form>
 </dialog>
@@ -705,13 +716,136 @@
   const { invoke } = window.__TAURI__.core;
   const { listen }  = window.__TAURI__.event;
 
+  // ---------------------------------------------------------- 語言
+  // 介面字串兩份字典。引擎回報的錯誤訊息不翻——那是診斷用的，跟紀錄檔一致。
+  const I18N = {
+    'zh-TW': {
+      'input.placeholder': '貼上影片、音樂或圖片的連結，一行一個',
+      'modes.label': '要下載什麼',
+      'mode.video': '影片', 'mode.audio': '只要聲音', 'mode.image': '圖片',
+      'mode.image.title': '影片連結抓封面圖；圖片網址直接抓；一般網頁抓頁上的圖',
+      'go': '加入佇列',
+      'hint.default': '單支或整份清單都可以',
+      'setup.preparing': '正在準備下載工具…',
+      'setup.failed': '準備工具失敗：', 'setup.unknown': '原因不明',
+      'setup.fetching': '首次啟動，正在取得 {tool}{size}',
+      'update.go': '更新並重新啟動',
+      'update.available': '有新版本 v{v}', 'update.latest': 'Haul 已是最新版',
+      'update.checkFailed': '檢查更新失敗：', 'update.downloading': '正在下載更新…',
+      'update.progress': '正在下載更新 {a}', 'update.progressOf': '正在下載更新 {a} / {b}',
+      'update.failed': '更新失敗：',
+      'ytdlp.updating': '正在更新 yt-dlp…', 'ytdlp.latest': 'yt-dlp 已是最新版',
+      'tab.active': '佇列', 'tab.done': '已完成',
+      'empty.active': '佇列是空的。貼上連結就會開始下載。', 'empty.done': '還沒有完成的項目。',
+      'settings.title': '設定', 'footer.openFolder': '開啟資料夾', 'footer.clearDone': '清掉已完成',
+      'status.queued': '等候中', 'status.resolving': '解析中',
+      'status.browser': '瀏覽器偵測中 · 頁面要按播放的話請在視窗裡按',
+      'status.recording': '錄製中 · 在瀏覽器視窗裡播放要錄的內容',
+      'status.downloading': '下載中', 'status.verifying': '驗證中',
+      'stat.detected': '偵測到 {n} 個媒體', 'stat.verified': '已驗證', 'stat.verifiedRec': '已驗證 · 錄製',
+      'stat.failed': '失敗',
+      'row.copySrc': '點一下複製連結', 'row.copied': '已複製', 'row.copyFailed': '複製失敗',
+      'row.remove': '從列表移除', 'row.retry': '重試', 'row.browser': '用瀏覽器抓',
+      'row.confirmYes': '移除', 'row.confirmNo': '取消',
+      'row.confirmRecording': '還在錄製中，移除會停止並丟掉錄到的內容。',
+      'row.confirmActive': '還沒下載完成，移除會取消這次下載。',
+      'row.missing': '檔案已不在', 'row.play': '點一下播放',
+      'row.stop': '停止', 'row.record': '改用錄製', 'row.recordAudio': '改用錄製（只要聲音）',
+      'reveal.finder': '在 Finder 顯示', 'reveal.explorer': '在檔案總管顯示',
+      'tally.running': '{n} 進行中', 'tally.done': '{n} 完成', 'tally.failed': '{n} 失敗',
+      'cand.manifest': '串流清單', 'cand.file': '單檔', 'cand.chosen': '已選', 'cand.pick': '抓這個',
+      'set.ui': '介面', 'set.language': '語言', 'lang.system': '跟隨系統',
+      'set.download': '下載', 'set.outDir': '輸出資料夾', 'set.outDefault': '預設（~/Downloads/Haul）',
+      'set.choose': '選擇…', 'set.restart': '重新啟動後生效', 'set.quality': '畫質上限', 'set.noLimit': '不設限',
+      'set.concurrency': '同時下載數', 'set.chime': '佇列完成時播放提示音', 'set.chimeBuiltin': '內建提示音',
+      'set.chooseFile': '選檔…', 'set.chimeBuiltinBtn': '改回內建', 'set.chimeTest': '試聽',
+      'set.login': '登入', 'set.cookies': '登入狀態來源', 'set.noLogin': '不用登入',
+      'set.cookiesNote': 'Haul 不碰帳密，只借用瀏覽器已有的登入狀態。',
+      'set.browser': '瀏覽器 / 錄製', 'set.browserPath': '瀏覽器路徑', 'set.autoDetect': '自動偵測', 'set.auto': '自動',
+      'set.recordMax': '錄製上限（分鐘）', 'set.tools': '工具',
+      'set.updateYtdlp': '更新 yt-dlp', 'set.updateYtdlp.title': '各站改版時靠這個跟上',
+      'set.updateApp': '檢查 Haul 更新', 'set.updateApp.title': '從 GitHub Releases 取得新版',
+      'set.cancel': '取消', 'set.save': '儲存', 'set.saveFailed': '存不了設定：',
+    },
+    'en': {
+      'input.placeholder': 'Paste video, music or image links, one per line',
+      'modes.label': 'What to download',
+      'mode.video': 'Video', 'mode.audio': 'Audio only', 'mode.image': 'Images',
+      'mode.image.title': 'Cover art for video links; direct image URLs; every image on an ordinary page',
+      'go': 'Add to queue',
+      'hint.default': 'A single link or a whole playlist',
+      'setup.preparing': 'Preparing download tools…',
+      'setup.failed': 'Preparing tools failed: ', 'setup.unknown': 'unknown reason',
+      'setup.fetching': 'First launch, fetching {tool}{size}',
+      'update.go': 'Update and restart',
+      'update.available': 'Version v{v} is available', 'update.latest': 'Haul is up to date',
+      'update.checkFailed': 'Update check failed: ', 'update.downloading': 'Downloading update…',
+      'update.progress': 'Downloading update {a}', 'update.progressOf': 'Downloading update {a} / {b}',
+      'update.failed': 'Update failed: ',
+      'ytdlp.updating': 'Updating yt-dlp…', 'ytdlp.latest': 'yt-dlp is up to date',
+      'tab.active': 'Queue', 'tab.done': 'Done',
+      'empty.active': 'The queue is empty. Paste a link to start.', 'empty.done': 'Nothing finished yet.',
+      'settings.title': 'Settings', 'footer.openFolder': 'Open folder', 'footer.clearDone': 'Clear done',
+      'status.queued': 'Queued', 'status.resolving': 'Resolving',
+      'status.browser': 'Browser sniffing · press play in the window if the page needs it',
+      'status.recording': 'Recording · play the content in the browser window',
+      'status.downloading': 'Downloading', 'status.verifying': 'Verifying',
+      'stat.detected': '{n} media found', 'stat.verified': 'Verified', 'stat.verifiedRec': 'Verified · recorded',
+      'stat.failed': 'Failed',
+      'row.copySrc': 'Click to copy the link', 'row.copied': 'Copied', 'row.copyFailed': 'Copy failed',
+      'row.remove': 'Remove from list', 'row.retry': 'Retry', 'row.browser': 'Use browser',
+      'row.confirmYes': 'Remove', 'row.confirmNo': 'Cancel',
+      'row.confirmRecording': 'Still recording — removing stops it and discards what was captured.',
+      'row.confirmActive': 'Not finished yet — removing cancels this download.',
+      'row.missing': 'File is gone', 'row.play': 'Click to play',
+      'row.stop': 'Stop', 'row.record': 'Record instead', 'row.recordAudio': 'Record instead (audio only)',
+      'reveal.finder': 'Show in Finder', 'reveal.explorer': 'Show in Explorer',
+      'tally.running': '{n} running', 'tally.done': '{n} done', 'tally.failed': '{n} failed',
+      'cand.manifest': 'stream manifest', 'cand.file': 'file', 'cand.chosen': 'chosen', 'cand.pick': 'Get this',
+      'set.ui': 'Interface', 'set.language': 'Language', 'lang.system': 'System',
+      'set.download': 'Download', 'set.outDir': 'Output folder', 'set.outDefault': 'Default (~/Downloads/Haul)',
+      'set.choose': 'Choose…', 'set.restart': 'Takes effect after restart', 'set.quality': 'Quality cap', 'set.noLimit': 'No limit',
+      'set.concurrency': 'Concurrent downloads', 'set.chime': 'Play a chime when the queue finishes', 'set.chimeBuiltin': 'Built-in chime',
+      'set.chooseFile': 'Choose file…', 'set.chimeBuiltinBtn': 'Use built-in', 'set.chimeTest': 'Preview',
+      'set.login': 'Login', 'set.cookies': 'Login source', 'set.noLogin': 'No login',
+      'set.cookiesNote': 'Haul never touches passwords; it only borrows the browser\'s existing login.',
+      'set.browser': 'Browser / Recording', 'set.browserPath': 'Browser path', 'set.autoDetect': 'Auto-detect', 'set.auto': 'Auto',
+      'set.recordMax': 'Recording limit (minutes)', 'set.tools': 'Tools',
+      'set.updateYtdlp': 'Update yt-dlp', 'set.updateYtdlp.title': 'Keep up when sites change',
+      'set.updateApp': 'Check for Haul updates', 'set.updateApp.title': 'Fetch a new version from GitHub Releases',
+      'set.cancel': 'Cancel', 'set.save': 'Save', 'set.saveFailed': 'Could not save settings: ',
+    },
+  };
+  let lang = 'zh-TW';
+  const t = (key, vars) => {
+    let s = (I18N[lang] && I18N[lang][key]) || I18N['zh-TW'][key] || key;
+    if (vars) for (const k in vars) s = s.replace('{' + k + '}', vars[k]);
+    return s;
+  };
+  function systemLang() {
+    return String(navigator.language || '').toLowerCase().startsWith('zh') ? 'zh-TW' : 'en';
+  }
+  /* 把靜態標記與動態列全部重畫。切換語言不用重開 */
+  function applyLang(next) {
+    lang = I18N[next] ? next : systemLang();
+    document.documentElement.lang = lang;
+    for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
+    for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
+    for (const el of document.querySelectorAll('[data-i18n-placeholder]')) el.placeholder = t(el.dataset.i18nPlaceholder);
+    for (const el of document.querySelectorAll('[data-i18n-aria-label]')) el.setAttribute('aria-label', t(el.dataset.i18nAriaLabel));
+    // 下面這些在啟動流程走到這裡時都已宣告；hint 的預設字由 data-i18n 一起換掉
+    for (const row of rows.values()) if (row.item) paint(row.item);
+    updateTabs();
+    updateTally();
+  }
+
   const queue = document.getElementById('queue');
   const empty = document.getElementById('empty');
   const activeBox = document.getElementById('active');
   const doneBox   = document.getElementById('done');
   const nActive   = document.getElementById('n-active');
   const nDone     = document.getElementById('n-done');
-  const REVEAL_LABEL = /Win/.test(navigator.platform) ? '在檔案總管顯示' : '在 Finder 顯示';
+  const revealLabel = () => t(/Win/.test(navigator.platform) ? 'reveal.explorer' : 'reveal.finder');
   const input = document.getElementById('input');
   const field = document.getElementById('field');
   const go    = document.getElementById('go');
@@ -720,14 +854,7 @@
   /** id -> { item, el, refs }，只改動到的那一列，不重繪整張表 */
   const rows = new Map();
 
-  const LABEL = {
-    queued:      '等候中',
-    resolving:   '解析中',
-    browser:     '瀏覽器偵測中 · 頁面要按播放的話請在視窗裡按',
-    recording:   '錄製中 · 在瀏覽器視窗裡播放要錄的內容',
-    downloading: '下載中',
-    verifying:   '驗證中',
-  };
+  const label = status => t('status.' + status);
 
   const mb = n => (n / 1048576).toFixed(1) + ' MB';
 
@@ -743,17 +870,17 @@
           ? `${mb(it.bytes)} / ${mb(it.total)}`
           : mb(it.bytes);
       case 'browser':
-        return it.total ? `偵測到 ${it.total} 個媒體` : LABEL.browser;
+        return it.total ? t('stat.detected', { n: it.total }) : label('browser');
       case 'recording':
-        return it.bytes ? `● ${clock(it.secs || 0)} · ${mb(it.bytes)}` : LABEL.recording;
+        return it.bytes ? `● ${clock(it.secs || 0)} · ${mb(it.bytes)}` : label('recording');
       case 'done': {
-        const tag = it.source === 'recording' ? '已驗證 · 錄製' : '已驗證';
+        const tag = t(it.source === 'recording' ? 'stat.verifiedRec' : 'stat.verified');
         return it.secs ? `${tag} · ${clock(it.secs)}` : tag;
       }
       case 'failed':
-        return '失敗';
+        return t('stat.failed');
       default:
-        return LABEL[it.status] || it.status;
+        return I18N[lang]['status.' + it.status] ? label(it.status) : it.status;
     }
   }
 
@@ -763,21 +890,21 @@
     el.innerHTML =
       '<span class="thumb"><img alt=""></span>' +
       '<span class="name"></span>' +
-      '<span class="src" title="點一下複製連結"></span>' +
+      '<span class="src"></span>' +
       '<span class="stat"></span>' +
       '<div class="meter"><i></i></div>' +
-      '<button type="button" class="x" title="從列表移除">×</button>' +
+      '<button type="button" class="x">×</button>' +
       '<button type="button" class="show"></button>' +
       '<span class="why"></span>' +
       '<div class="acts">' +
-        '<button type="button" class="act retry" hidden>重試</button>' +
-        '<button type="button" class="act" hidden>用瀏覽器抓</button>' +
+        '<button type="button" class="act retry" hidden></button>' +
+        '<button type="button" class="act" hidden></button>' +
         '<button type="button" class="act act2" hidden></button>' +
       '</div>' +
       '<div class="cands" hidden></div>' +
       '<div class="confirm" hidden><span></span>' +
-        '<button type="button" class="yes primary">移除</button>' +
-        '<button type="button" class="no">取消</button></div>';
+        '<button type="button" class="yes primary"></button>' +
+        '<button type="button" class="no"></button></div>';
     const refs = {
       thumb: el.querySelector('.thumb'),
       img:   el.querySelector('.thumb img'),
@@ -815,7 +942,6 @@
       refs.act2.disabled = true;
       invoke(cmd, { id: it.id }).catch(err => say(String(err), true));
     });
-    refs.show.textContent = REVEAL_LABEL;
     refs.show.addEventListener('click', ev => {
       ev.stopPropagation();
       if (el.dataset.path) invoke('reveal_file', { path: el.dataset.path }).catch(err => say(String(err), true));
@@ -826,10 +952,10 @@
       const url = refs.src.dataset.url;
       if (await copyText(url)) {
         refs.src.classList.add('copied');
-        refs.src.textContent = '已複製';
+        refs.src.textContent = t('row.copied');
         setTimeout(() => { refs.src.textContent = url + '\u200E'; refs.src.classList.remove('copied'); }, 900);
       } else {
-        say('複製失敗', true);
+        say(t('row.copyFailed'), true);
       }
     });
     refs.yes.addEventListener('click', ev => { ev.stopPropagation(); doRemove(it.id, el); });
@@ -842,9 +968,7 @@
   /* 移除：完成或失敗的直接拿掉；還沒完成的先在列內問一次，因為那等於取消下載 */
   function askRemove(id, el, refs) {
     if (TERMINAL.has(el.dataset.status)) return doRemove(id, el);
-    refs.confirmText.textContent = el.dataset.status === 'recording'
-      ? '還在錄製中，移除會停止並丟掉錄到的內容。'
-      : '還沒下載完成，移除會取消這次下載。';
+    refs.confirmText.textContent = t(el.dataset.status === 'recording' ? 'row.confirmRecording' : 'row.confirmActive');
     refs.confirm.hidden = false;
   }
 
@@ -868,10 +992,6 @@
   // ---------------------------------------------------------- 分頁
 
   let tab = 'active';
-  const EMPTY_TEXT = {
-    active: '佇列是空的。貼上連結就會開始下載。',
-    done: '還沒有完成的項目。',
-  };
   function showTab(name) {
     tab = name;
     for (const b of document.querySelectorAll('.tab')) {
@@ -887,7 +1007,7 @@
     nActive.textContent = activeBox.childElementCount;
     nDone.textContent = doneBox.childElementCount;
     const box = tab === 'done' ? doneBox : activeBox;
-    empty.textContent = EMPTY_TEXT[tab];
+    empty.textContent = t('empty.' + tab);
     empty.hidden = box.childElementCount > 0;
   }
   for (const b of document.querySelectorAll('.tab')) {
@@ -915,7 +1035,7 @@
     }).catch(() => {
       // 原檔已不在（或讀不到）：留著紀錄但不再假裝點得開
       el.dataset.missing = '1';
-      el.title = '檔案已不在';
+      el.title = t('row.missing');
     });
   }
 
@@ -927,6 +1047,16 @@
       rows.set(it.id, row);
     }
     const { el, refs } = row;
+    row.item = it; // 切換語言時要能整列重畫
+
+    // 依當下語言的固定文字
+    refs.src.title = t('row.copySrc');
+    refs.x.title = t('row.remove');
+    refs.retry.textContent = t('row.retry');
+    refs.act.textContent = t('row.browser');
+    refs.yes.textContent = t('row.confirmYes');
+    refs.no.textContent = t('row.confirmNo');
+    refs.show.textContent = revealLabel();
 
     el.dataset.status = it.status;
     place(el, it.status);
@@ -950,7 +1080,8 @@
     }
 
     if (it.path) el.dataset.path = it.path;
-    if (!el.dataset.missing) el.title = it.status === 'done' && it.path ? '點一下播放' : '';
+    if (el.dataset.missing) el.title = t('row.missing');
+    else el.title = it.status === 'done' && it.path ? t('row.play') : '';
 
     refs.why.textContent = it.status === 'failed' ? (it.error || '') : '';
     refs.why.hidden = it.status !== 'failed';
@@ -964,12 +1095,12 @@
     if (it.status === 'recording') {
       refs.act2.hidden = false;
       refs.act2.disabled = false;
-      refs.act2.textContent = '停止';
+      refs.act2.textContent = t('row.stop');
       refs.act2.classList.remove('primary');
     } else if (it.status === 'failed' && it.canRecord) {
       refs.act2.hidden = false;
       refs.act2.disabled = false;
-      refs.act2.textContent = it.kind === 'audio' ? '改用錄製（只要聲音）' : '改用錄製';
+      refs.act2.textContent = t(it.kind === 'audio' ? 'row.recordAudio' : 'row.record');
       refs.act2.classList.toggle('primary', !it.canBrowser);
     } else {
       refs.act2.hidden = true;
@@ -991,9 +1122,9 @@
       else running++;
     }
     const parts = [];
-    if (running) parts.push(`${running} 進行中`);
-    if (done)    parts.push(`${done} 完成`);
-    if (failed)  parts.push(`${failed} 失敗`);
+    if (running) parts.push(t('tally.running', { n: running }));
+    if (done)    parts.push(t('tally.done', { n: done }));
+    if (failed)  parts.push(t('tally.failed', { n: failed }));
     tally.textContent = parts.join(' · ');
 
     // 進行中的數量從 >0 掉到 0：佇列清空了，響一次。
@@ -1014,7 +1145,7 @@
   }
 
   const hint = document.getElementById('hint');
-  const HINT_DEFAULT = '單支或整份清單都可以';
+  const HINT_DEFAULT = () => t('hint.default');
   let mode = 'video';
 
   for (const b of document.querySelectorAll('.mode')) {
@@ -1031,9 +1162,9 @@
   function say(msg, bad) {
     hint.textContent = msg;
     hint.classList.toggle('bad', !!bad);
-    if (msg !== HINT_DEFAULT) {
+    if (msg !== HINT_DEFAULT()) {
       clearTimeout(say.t);
-      say.t = setTimeout(() => say(HINT_DEFAULT, false), 5000);
+      say.t = setTimeout(() => say(HINT_DEFAULT(), false), 5000);
     }
   }
 
@@ -1134,13 +1265,13 @@
     candidates.forEach((c, i) => {
       const line = document.createElement('div');
       line.className = 'cand' + (i === chosen ? ' on' : '');
-      const kind = c.kind === 'manifest' ? '串流清單' : '單檔';
+      const kind = t(c.kind === 'manifest' ? 'cand.manifest' : 'cand.file');
       line.innerHTML =
-        `<span>${i === chosen ? '已選' : '　　'}</span>` +
+        `<span>${i === chosen ? t('cand.chosen') : '　　'}</span>` +
         `<span>${kind}</span>` +
         `<span>${kb(c.size)}</span>` +
         `<span class="url"></span>` +
-        (i === chosen ? '' : '<button type="button" class="pick">抓這個</button>');
+        (i === chosen ? '' : `<button type="button" class="pick">${t('cand.pick')}</button>`);
       line.querySelector('.url').textContent = c.url;
       line.querySelector('.url').title = c.url;
       const pick = line.querySelector('.pick');
@@ -1159,23 +1290,23 @@
     if (s.stage === 'done') { setup.hidden = true; return; }
     setup.hidden = false;
     if (s.stage === 'failed') {
-      setupText.textContent = '準備工具失敗：' + (s.error || '原因不明');
+      setupText.textContent = t('setup.failed') + (s.error || t('setup.unknown'));
       setupFill.style.width = '0';
       return;
     }
     const mbTotal = s.total ? ` ${mb(s.bytes)} / ${mb(s.total)}` : '';
-    setupText.textContent = `首次啟動，正在取得 ${s.tool}${mbTotal}`;
+    setupText.textContent = t('setup.fetching', { tool: s.tool, size: mbTotal });
     setupFill.style.width = s.total ? (s.bytes / s.total) * 100 + '%' : '0';
   });
 
   document.getElementById('update').addEventListener('click', async (ev) => {
     ev.target.disabled = true;
-    say('正在更新 yt-dlp…', false);
+    say(t('ytdlp.updating'), false);
     try {
       const out = await invoke('update_tools');
-      say(out || 'yt-dlp 已是最新版', false);
+      say(out || t('ytdlp.latest'), false);
     } catch (e) {
-      say('更新失敗：' + String(e), true);
+      say(t('update.failed') + String(e), true);
     } finally {
       ev.target.disabled = false;
     }
@@ -1240,9 +1371,10 @@
     draftChimeFile = (s.chime && s.chime.file) || null;
     draftBrowserPath = s.browserPath || null;
     draftOutDir = s.outDir || null;
-    showPath($('set-out'), s.outDir, '預設（~/Downloads/Haul）');
-    showPath($('set-chime-file'), draftChimeFile, '內建提示音');
-    showPath($('set-browser'), draftBrowserPath, '自動偵測');
+    $('set-lang').value = s.language || '';
+    showPath($('set-out'), s.outDir, t('set.outDefault'));
+    showPath($('set-chime-file'), draftChimeFile, t('set.chimeBuiltin'));
+    showPath($('set-browser'), draftBrowserPath, t('set.autoDetect'));
   }
 
   $('gear').addEventListener('click', async () => {
@@ -1253,7 +1385,7 @@
 
   $('set-out-pick').addEventListener('click', async () => {
     const path = await invoke('pick_folder');
-    if (path) { draftOutDir = path; showPath($('set-out'), path, '預設（~/Downloads/Haul）'); }
+    if (path) { draftOutDir = path; showPath($('set-out'), path, t('set.outDefault')); }
   });
 
   $('chime-pick').addEventListener('click', async () => {
@@ -1262,13 +1394,13 @@
     try {
       await invoke('verify_audio', { path });
       draftChimeFile = path;
-      showPath($('set-chime-file'), path, '內建提示音');
+      showPath($('set-chime-file'), path, t('set.chimeBuiltin'));
       $('set-chime-on').checked = true;
     } catch (e) { say(String(e), true); }
   });
   $('chime-clear').addEventListener('click', () => {
     draftChimeFile = null;
-    showPath($('set-chime-file'), null, '內建提示音');
+    showPath($('set-chime-file'), null, t('set.chimeBuiltin'));
   });
   $('chime-test').addEventListener('click', async () => {
     if (draftChimeFile) { try { await playFile(draftChimeFile); return; } catch (_) {} }
@@ -1277,11 +1409,11 @@
 
   $('browser-pick').addEventListener('click', async () => {
     const path = await invoke('pick_audio_file'); // 同一個原生選檔器，選任意檔
-    if (path) { draftBrowserPath = path; showPath($('set-browser'), path, '自動偵測'); }
+    if (path) { draftBrowserPath = path; showPath($('set-browser'), path, t('set.autoDetect')); }
   });
   $('browser-clear').addEventListener('click', () => {
     draftBrowserPath = null;
-    showPath($('set-browser'), null, '自動偵測');
+    showPath($('set-browser'), null, t('set.autoDetect'));
   });
 
   $('set-save').addEventListener('click', async () => {
@@ -1294,12 +1426,14 @@
       browserPath: draftBrowserPath,
       recordMaxSecs: Math.max(1, Number($('set-record-max').value) || 180) * 60,
       chime: { enabled: $('set-chime-on').checked, file: draftChimeFile },
+      language: $('set-lang').value || null,
     };
     try {
       await invoke('save_settings', { settings: next });
       settings = next;
       dlg.close();
-    } catch (e) { say('存不了設定：' + String(e), true); }
+      applyLang(next.language || systemLang());
+    } catch (e) { say(t('set.saveFailed') + String(e), true); }
   });
 
   // ---------------------------------------------------------- 自我更新
@@ -1311,32 +1445,33 @@
     try {
       const u = await invoke('check_update');
       if (u) {
-        updateText.textContent = `有新版本 v${u.version}`;
+        updateText.textContent = t('update.available', { v: u.version });
         updateBar.hidden = false;
         if (manual) dlg.close();
       } else if (manual) {
-        say('Haul 已是最新版', false);
+        say(t('update.latest'), false);
       }
     } catch (e) {
-      if (manual) say('檢查更新失敗：' + String(e), true);
+      if (manual) say(t('update.checkFailed') + String(e), true);
     }
   }
   updateGo.addEventListener('click', async () => {
     updateGo.disabled = true;
-    updateText.textContent = '正在下載更新…';
+    updateText.textContent = t('update.downloading');
     try { await invoke('install_update'); }   // 成功就重新啟動，不會回來
-    catch (e) { updateText.textContent = '更新失敗：' + String(e); updateGo.disabled = false; }
+    catch (e) { updateText.textContent = t('update.failed') + String(e); updateGo.disabled = false; }
   });
   listen('update', e => {
     const { bytes, total } = e.payload;
     updateText.textContent = total
-      ? `正在下載更新 ${mb(bytes)} / ${mb(total)}`
-      : `正在下載更新 ${mb(bytes)}`;
+      ? t('update.progressOf', { a: mb(bytes), b: mb(total) })
+      : t('update.progress', { a: mb(bytes) });
   });
   $('update-app').addEventListener('click', () => checkUpdate(true));
 
   (async () => {
     settings = await invoke('get_settings');
+    applyLang(settings.language || systemLang());
     document.getElementById('dest').textContent = await invoke('out_dir');
     reset(await invoke('snapshot'));
     input.focus();

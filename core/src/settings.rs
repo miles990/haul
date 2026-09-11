@@ -23,6 +23,8 @@ pub struct Settings {
     pub record_max_secs: u64,
     /// 佇列完成提示音
     pub chime: Chime,
+    /// 介面語言（zh-TW / en）。None 跟隨系統
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +54,7 @@ impl Default for Settings {
             browser_path: None,
             record_max_secs: 3 * 3600,
             chime: Chime::default(),
+            language: None,
         }
     }
 }
@@ -114,9 +117,11 @@ mod tests {
         s.cookies_from = Some("chrome".into());
         s.chime.enabled = true;
         s.chime.file = Some("/tmp/ding.mp3".into());
+        s.language = Some("en".into());
         s.save(&f).unwrap();
         let back = Settings::load(&f);
         assert_eq!(back.cookies_from.as_deref(), Some("chrome"));
+        assert_eq!(back.language.as_deref(), Some("en"));
         assert!(back.chime.enabled);
         assert_eq!(back.chime.file.as_deref(), Some(Path::new("/tmp/ding.mp3")));
     }
