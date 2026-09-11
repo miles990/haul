@@ -2,6 +2,7 @@
 name = "haul-cli"
 description = "Haul 的命令列介面：給腳本與 AI agent 用"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 

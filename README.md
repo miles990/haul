@@ -138,3 +138,8 @@ cargo test --workspace
 
 Tests that need real network or media are gated behind environment variables
 (`HAUL_TEST_MEDIA`, `HAUL_TEST_NET`, `HAUL_TEST_CHROME`) and skip otherwise.
+
+## License
+
+[MIT](LICENSE). yt-dlp, ffmpeg and gallery-dl are separate projects with their own licenses;
+Haul downloads them on first launch rather than bundling them.

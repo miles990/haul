@@ -2,6 +2,7 @@
 name = "haul-gui"
 description = "萬用媒體下載器"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 

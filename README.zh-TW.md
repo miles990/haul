@@ -128,3 +128,8 @@ cargo test --workspace
 
 需要真實網路或素材的測試由環境變數開啟（`HAUL_TEST_MEDIA`、`HAUL_TEST_NET`、
 `HAUL_TEST_CHROME`），沒設就跳過。
+
+## 授權
+
+[MIT](LICENSE)。yt-dlp、ffmpeg、gallery-dl 是各自獨立的專案、各有自己的授權；
+Haul 在首次啟動時下載它們，不打包進安裝檔。
