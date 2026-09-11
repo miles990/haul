@@ -4,6 +4,7 @@
 //! Tauri event 推給 webview，CLI 把同一批事件印成 NDJSON。兩邊共用同一套
 //! 行為，不會各自長出一份。
 
+use crate::browser;
 use crate::cookies;
 use crate::direct;
 use crate::extract::{self, Mode, Probe};
@@ -16,7 +17,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{OnceCell, Semaphore};
@@ -33,7 +34,7 @@ pub struct Item {
     pub title: String,
     /// video | audio
     pub kind: String,
-    /// queued | resolving | downloading | verifying | done | failed
+    /// queued | resolving | browser | downloading | verifying | done | failed
     pub status: String,
     pub bytes: u64,
     pub total: u64,
@@ -45,6 +46,10 @@ pub struct Item {
     /// 完成後的完整路徑
     pub path: Option<String>,
     pub error: Option<String>,
+    /// 這個失敗是萃取層面的、瀏覽器可能救得了。GUI 據此決定要不要出現
+    /// 「用瀏覽器抓」；401 / 429 / 驗證失敗不會設，開瀏覽器救不了那些。
+    #[serde(default)]
+    pub can_browser: bool,
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -62,6 +67,12 @@ pub enum Event {
     },
     /// 任何狀態變化都送出完整項目，消費端不需要自己拼狀態
     Item(Item),
+    /// 瀏覽器偵測到的候選。`chosen` 是自動挑的那個，其餘讓使用者可以另外加
+    Candidates {
+        id: u64,
+        candidates: Vec<browser::sniff::Candidate>,
+        chosen: Option<usize>,
+    },
 }
 
 pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
@@ -80,6 +91,10 @@ pub struct Config {
     /// 從哪個瀏覽器讀 cookie（chrome / firefox / safari…）。
     /// Haul 不碰帳密，只用使用者已經有的 session。
     pub cookies_from: Option<String>,
+    /// 前三層抓不到時自動落到瀏覽器。預設 false：開視窗是使用者要明確要求的事。
+    pub browser_fallback: bool,
+    /// 指定瀏覽器可執行檔；None 就自動找
+    pub browser_path: Option<PathBuf>,
     pub max_downloads: usize,
     pub max_verifies: usize,
 }
@@ -93,6 +108,8 @@ impl Config {
             allow_html: false,
             overwrite: false,
             cookies_from: None,
+            browser_fallback: false,
+            browser_path: None,
             max_downloads: 3,
             max_verifies: 2,
         }
@@ -113,6 +130,20 @@ enum Job {
         /// 否則一話漫畫就把下載資料夾洗爆
         subdir: Option<String>,
     },
+    /// 瀏覽器攔到的請求。清單交給 yt-dlp、單檔走直接抓取，都帶原始 header
+    Browser {
+        media: String,
+        title: String,
+        headers: Vec<(String, String)>,
+        manifest: bool,
+        content_type: Option<String>,
+    },
+}
+
+/// Haul 自己的瀏覽器實例與它的 CDP 連線
+struct BrowserSession {
+    chrome: browser::chrome::Chrome,
+    cdp: Arc<browser::cdp::Cdp>,
 }
 
 enum Resolution {
@@ -149,6 +180,10 @@ pub struct Engine {
     /// 登入頁整個 session 只開一次。一個 200 張的圖庫全部 401 時，
     /// 不該給使用者彈 200 個分頁。
     login_opened: AtomicBool,
+    /// Haul 自己的瀏覽器實例，用到才啟動。整個 Engine 共用一個，多個項目開多個分頁。
+    browser: tokio::sync::Mutex<Option<BrowserSession>>,
+    /// 還有幾個項目在用瀏覽器。歸零就關掉——不留一個 Chrome 在背景。
+    browser_users: AtomicUsize,
     log: Logger,
     dl: Semaphore,
     vf: Semaphore,
@@ -198,6 +233,8 @@ impl Engine {
             cookies_from: Mutex::new(cfg_cookies),
             cookie_file: Mutex::new(None),
             login_opened: AtomicBool::new(false),
+            browser: tokio::sync::Mutex::new(None),
+            browser_users: AtomicUsize::new(0),
             next_id: AtomicU64::new(next),
         }))
     }
@@ -252,6 +289,7 @@ impl Engine {
             verified: None,
             path: None,
             error: None,
+            can_browser: false,
         };
         let id = item.id;
         self.items.lock().unwrap().push(item.clone());
@@ -454,7 +492,18 @@ impl Engine {
         let resolution = match self.resolve(&tools, &input).await {
             Ok(r) => r,
             Err(e) => {
-                self.fail(id, e.to_string());
+                let msg = e.to_string();
+                let eligible = browser_eligible(&msg);
+                self.fail(id, msg);
+                if eligible {
+                    self.update(id, |i| i.can_browser = true);
+                    if self.cfg.browser_fallback {
+                        let me = self.clone();
+                        return vec![tokio::spawn(async move {
+                            me.retry_with_browser(id).await
+                        })];
+                    }
+                }
                 return Vec::new();
             }
         };
@@ -478,7 +527,7 @@ impl Engine {
                 for (job, label) in items {
                     let key = match &job {
                         Job::Ytdlp { url } => url.clone(),
-                        Job::Direct { media, .. } => media.clone(),
+                        Job::Direct { media, .. } | Job::Browser { media, .. } => media.clone(),
                     };
                     if !self.seen.lock().unwrap().insert(key.clone()) {
                         continue;
@@ -514,6 +563,7 @@ impl Engine {
                     // 否則診斷時看不出是哪條路徑接走的
                     Some(Job::Direct { subdir: Some(_), .. }) => "gallery",
                     Some(Job::Direct { .. }) => "direct",
+                    Some(Job::Browser { .. }) => "browser",
                     None => "none",
                 },
                 "mode": mode.as_str(),
@@ -811,6 +861,12 @@ impl Engine {
                 .as_deref()
                 .and_then(verify::level_for_content_type)
                 .unwrap_or_else(|| verify::level_for(&ext)),
+            // 清單經 yt-dlp 合併出來一定是媒體；單檔看 Chrome 回報的 MIME
+            Job::Browser { manifest: true, .. } => Level::Media,
+            Job::Browser { content_type, .. } => content_type
+                .as_deref()
+                .and_then(verify::level_for_content_type)
+                .unwrap_or(Level::Media),
         };
 
         match level {
@@ -937,8 +993,254 @@ impl Engine {
                     Ok((raw, None, Some(title.clone())))
                 }
             }
+
+            Job::Browser {
+                media,
+                title,
+                headers,
+                manifest,
+                ..
+            } => {
+                self.log.info(
+                    "browser.fetch",
+                    serde_json::json!({
+                        "url": cookies::redact(media),
+                        "manifest": manifest,
+                        "headers": headers.len(),
+                    }),
+                );
+                if *manifest {
+                    return extract::download(
+                        tools,
+                        media,
+                        mode,
+                        opts,
+                        None,
+                        headers,
+                        &self.staging,
+                        progress,
+                    )
+                    .await
+                    .map(|d| (d.path, d.secs, Some(title.clone())));
+                }
+                let ext = ext_of(media);
+                let ext = if ext.is_empty() { "mp4".to_string() } else { ext };
+                let raw = self.staging.join(format!("{tag}-raw.{ext}"));
+                direct::download(
+                    &self.client,
+                    media,
+                    &raw,
+                    self.cfg.allow_html,
+                    headers,
+                    progress,
+                )
+                .await?;
+                if mode == Mode::Audio && is_video_container(&ext) {
+                    let m4a = self.staging.join(format!("{tag}.m4a"));
+                    let extracted = direct::extract_audio(&tools.ffmpeg, &raw, &m4a).await;
+                    let _ = tokio::fs::remove_file(&raw).await;
+                    extracted?;
+                    Ok((m4a, None, Some(title.clone())))
+                } else {
+                    Ok((raw, None, Some(title.clone())))
+                }
+            }
         }
     }
+
+    // ------------------------------------------------------------ 瀏覽器層
+
+    async fn browser_session(&self) -> Result<Arc<browser::cdp::Cdp>, String> {
+        let mut guard = self.browser.lock().await;
+        if let Some(s) = guard.as_mut() {
+            if s.chrome.alive() {
+                return Ok(s.cdp.clone());
+            }
+            // 使用者把整個瀏覽器關了：丟掉舊的重開
+            *guard = None;
+        }
+        let exe = browser::chrome::find(self.cfg.browser_path.as_deref())
+            .map_err(|e| e.to_string())?;
+        // profile 跟 bin/ 平行放在 app 資料夾，不放進 bin/ —— 那裡是工具
+        let dir = self
+            .cfg
+            .bin_dir
+            .parent()
+            .unwrap_or(&self.cfg.bin_dir)
+            .join("browser");
+        let chrome = browser::chrome::launch(&exe, &dir)
+            .await
+            .map_err(|e| e.to_string())?;
+        let cdp = browser::cdp::Cdp::connect(&chrome.ws_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.log.info(
+            "browser.launched",
+            serde_json::json!({ "exe": exe.display().to_string() }),
+        );
+        *guard = Some(BrowserSession {
+            chrome,
+            cdp: cdp.clone(),
+        });
+        Ok(cdp)
+    }
+
+    async fn browser_release(&self) {
+        if self.browser_users.fetch_sub(1, Ordering::SeqCst) == 1 {
+            if let Some(s) = self.browser.lock().await.take() {
+                let _ = s
+                    .cdp
+                    .call(None, "Browser.close", serde_json::json!({}))
+                    .await;
+                drop(s); // kill_on_drop 兜底
+                self.log.info("browser.closed", serde_json::json!({}));
+            }
+        }
+    }
+
+    /// 用瀏覽器重試一個萃取失敗的項目。
+    pub async fn retry_with_browser(self: &Arc<Self>, id: u64) {
+        let Some(item) = self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| i.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let mode = Mode::parse(&item.kind);
+        self.update(id, |i| {
+            i.status = "browser".into();
+            i.error = None;
+            i.can_browser = false;
+            i.total = 0;
+        });
+        self.browser_users.fetch_add(1, Ordering::SeqCst);
+
+        let outcome = self.sniff_for(id, &item.input).await;
+        self.browser_release().await;
+
+        let (job, title) = match outcome {
+            Ok(v) => v,
+            Err(e) => return self.fail(id, e),
+        };
+        let tools = match self.tools().await {
+            Ok(t) => t,
+            Err(e) => return self.fail(id, e),
+        };
+        self.update(id, |i| i.title = title);
+        self.run(tools, id, job, mode, extract::Options::default())
+            .await;
+    }
+
+    async fn sniff_for(&self, id: u64, url: &str) -> Result<(Job, String), String> {
+        let cdp = self.browser_session().await?;
+        let cookies = self
+            .cookie_file
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, f)| cookies::parse_netscape(f))
+            .unwrap_or_default();
+
+        let sniffed = browser::sniff::sniff(&cdp, url, &cookies, |n| {
+            // 借 total 顯示偵測到幾個，UI 依 status 決定怎麼呈現
+            self.update(id, |i| i.total = n as u64);
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let list = sniffed.candidates.list().to_vec();
+        let chosen = sniffed.candidates.best_index();
+        self.log.info(
+            "browser.sniffed",
+            serde_json::json!({
+                "id": id,
+                "candidates": list.len(),
+                "segments": sniffed.candidates.saw_segments(),
+                "chosen": chosen,
+            }),
+        );
+        self.emit(Event::Candidates {
+            id,
+            candidates: list,
+            chosen,
+        });
+
+        let best = sniffed.candidates.best().ok_or_else(|| {
+            if sniffed.candidates.saw_segments() {
+                "頁面在播分段串流但沒有清單（JS 自己組的），這種抓不到原檔，可改用錄製"
+                    .to_string()
+            } else {
+                "沒偵測到可下載的媒體。若頁面要按播放才會載入，開著瀏覽器再試一次；否則可改用錄製"
+                    .to_string()
+            }
+        })?;
+
+        let title = if sniffed.title.trim().is_empty() {
+            short(url)
+        } else {
+            sniffed.title.clone()
+        };
+        Ok((
+            Job::Browser {
+                media: best.url.clone(),
+                title: title.clone(),
+                headers: best.headers.clone(),
+                manifest: best.kind == browser::sniff::Kind::Manifest,
+                content_type: Some(best.mime.clone()),
+            },
+            title,
+        ))
+    }
+
+    /// 使用者從候選清單挑了另一個：新增一個項目去抓它。
+    /// 不取消原本那個——引擎沒有取消機制，那是獨立功能。
+    pub async fn add_candidate(
+        self: &Arc<Self>,
+        from_id: u64,
+        c: browser::sniff::Candidate,
+    ) -> Option<JoinHandle<()>> {
+        let (kind, title) = {
+            let items = self.items.lock().unwrap();
+            let it = items.iter().find(|i| i.id == from_id)?;
+            (it.kind.clone(), it.title.clone())
+        };
+        let mode = Mode::parse(&kind);
+        // 同一頁的不同候選要分得出來，標題帶上網址尾巴
+        let label = format!("{title}（{}）", short(&c.url));
+        let id = self.push(c.url.clone(), label.clone(), &kind);
+        let job = Job::Browser {
+            media: c.url,
+            title: label,
+            headers: c.headers,
+            manifest: c.kind == browser::sniff::Kind::Manifest,
+            content_type: Some(c.mime),
+        };
+        let tools = self.tools().await.ok()?;
+        let me = self.clone();
+        Some(tokio::spawn(async move {
+            me.run(tools, id, job, mode, extract::Options::default())
+                .await
+        }))
+    }
+}
+
+/// 瀏覽器能救的只有「萃取器不認得這頁」這一類。401 是身分問題、429 是限流、
+/// 驗證失敗是內容問題——開瀏覽器只會多花時間得到同樣的結果。
+fn browser_eligible(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    if e.contains("http 4") || e.contains("http 5") || e.contains("驗證未通過") {
+        return false;
+    }
+    e.contains("unsupported url")
+        || e.contains("not supported")
+        || e.contains("unable to extract")
+        || e.contains("不像檔案")
+        || e.contains("no video formats")
+        || e.contains("nothing to download")
 }
 
 // ---------------------------------------------------------------- 輔助
@@ -1213,6 +1515,17 @@ mod tests {
         assert_eq!(direct_ext("https://x.com/a.mp3", Mode::Audio), "mp3");
         // 圖片模式不受影響
         assert_eq!(direct_ext("https://x.com/a.jpg", Mode::Image), "jpg");
+    }
+
+    #[test]
+    fn only_extract_failures_are_browser_eligible() {
+        assert!(browser_eligible("ERROR: Unsupported URL: https://x"));
+        assert!(browser_eligible("[Liability] This website is not supported"));
+        assert!(browser_eligible("不像檔案：text/html"));
+        // 這些瀏覽器救不了
+        assert!(!browser_eligible("HTTP 401 Unauthorized"));
+        assert!(!browser_eligible("HTTP 429（換過 UA…）"));
+        assert!(!browser_eligible("驗證未通過：ffmpeg 解不開"));
     }
 
     #[test]

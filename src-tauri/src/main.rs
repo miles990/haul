@@ -113,10 +113,20 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // 引擎事件 → Tauri event。webview 只需要 item 與 setup 兩種。
+            // 引擎事件 → Tauri event。webview 需要 item、setup 與 candidates 三種。
             let sink: haul_core::Sink = Arc::new(move |ev: Event| match ev {
                 Event::Item(item) => {
                     let _ = handle.emit("item", item);
+                }
+                Event::Candidates {
+                    id,
+                    candidates,
+                    chosen,
+                } => {
+                    let _ = handle.emit(
+                        "candidates",
+                        serde_json::json!({ "id": id, "candidates": candidates, "chosen": chosen }),
+                    );
                 }
                 Event::Setup { tool, bytes, total } => {
                     let _ = handle.emit(
