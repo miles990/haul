@@ -293,6 +293,8 @@
     cursor: pointer;
   }
   .act:hover { color: var(--ink); background: #2b3138; }
+  /* 瀏覽器偵測不到時，錄製是唯一出路，讓它明顯一點 */
+  .act.primary { color: var(--lamp); border-color: #4a3a18; }
 
   /* 瀏覽器偵測到的候選。自動挑的那個標出來，其餘可以另外抓 */
   .cands {
@@ -427,6 +429,7 @@
     queued:      '等候中',
     resolving:   '解析中',
     browser:     '瀏覽器偵測中 · 頁面要按播放的話請在視窗裡按',
+    recording:   '錄製中 · 在瀏覽器視窗裡播放要錄的內容',
     downloading: '下載中',
     verifying:   '驗證中',
   };
@@ -446,8 +449,12 @@
           : mb(it.bytes);
       case 'browser':
         return it.total ? `偵測到 ${it.total} 個媒體` : LABEL.browser;
-      case 'done':
-        return it.secs ? `已驗證 · ${clock(it.secs)}` : '已驗證';
+      case 'recording':
+        return it.bytes ? `● ${clock(it.secs || 0)} · ${mb(it.bytes)}` : LABEL.recording;
+      case 'done': {
+        const tag = it.source === 'recording' ? '已驗證 · 錄製' : '已驗證';
+        return it.secs ? `${tag} · ${clock(it.secs)}` : tag;
+      }
       case 'failed':
         return '失敗';
       default:
@@ -464,19 +471,28 @@
       '<div class="meter"><i></i></div>' +
       '<span class="why"></span>' +
       '<button type="button" class="act" hidden>用瀏覽器抓</button>' +
+      '<button type="button" class="act act2" hidden></button>' +
       '<div class="cands" hidden></div>';
     const refs = {
       name:  el.querySelector('.name'),
       stat:  el.querySelector('.stat'),
       fill:  el.querySelector('.meter > i'),
       why:   el.querySelector('.why'),
-      act:   el.querySelector('.act'),
+      act:   el.querySelector('.act:not(.act2)'),
+      act2:  el.querySelector('.act2'),
       cands: el.querySelector('.cands'),
     };
     refs.act.addEventListener('click', ev => {
       ev.stopPropagation();
       refs.act.disabled = true;
       invoke('retry_with_browser', { id: it.id }).catch(err => say(String(err), true));
+    });
+    // act2 身兼「改用錄製」與「停止」，依當下狀態決定送哪個指令
+    refs.act2.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const cmd = el.dataset.status === 'recording' ? 'stop_recording' : 'record_item';
+      refs.act2.disabled = true;
+      invoke(cmd, { id: it.id }).catch(err => say(String(err), true));
     });
     queue.appendChild(el);
     return { el, refs };
@@ -510,6 +526,20 @@
     // 只有萃取類的失敗才給這顆；401 / 429 / 驗證失敗開瀏覽器也救不了
     refs.act.hidden = !(it.status === 'failed' && it.canBrowser);
     refs.act.disabled = false;
+    // act2：錄製中→停止；可改用錄製的失敗→改用錄製（瀏覽器也救不了時是唯一出路）
+    if (it.status === 'recording') {
+      refs.act2.hidden = false;
+      refs.act2.disabled = false;
+      refs.act2.textContent = '停止';
+      refs.act2.classList.remove('primary');
+    } else if (it.status === 'failed' && it.canRecord) {
+      refs.act2.hidden = false;
+      refs.act2.disabled = false;
+      refs.act2.textContent = it.kind === 'audio' ? '改用錄製（只要聲音）' : '改用錄製';
+      refs.act2.classList.toggle('primary', !it.canBrowser);
+    } else {
+      refs.act2.hidden = true;
+    }
     if (it.status !== 'browser' && it.status !== 'downloading' &&
         it.status !== 'verifying' && it.status !== 'done') {
       refs.cands.hidden = true;
@@ -622,7 +652,7 @@
   const setupFill = document.getElementById('setup-fill');
 
   // 已經動用到 yt-dlp / ffmpeg 的狀態。resolving 不算 —— 那時工具可能還在下載。
-  const NEEDS_TOOLS = new Set(['browser', 'downloading', 'verifying', 'done']);
+  const NEEDS_TOOLS = new Set(['browser', 'recording', 'downloading', 'verifying', 'done']);
 
   listen('item', e => {
     paint(e.payload);

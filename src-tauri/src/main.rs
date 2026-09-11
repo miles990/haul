@@ -117,6 +117,19 @@ fn retry_with_browser(app: AppHandle, id: u64) {
     tauri::async_runtime::spawn(async move { eng.retry_with_browser(id).await });
 }
 
+/// 萃取失敗或偵測不到媒體時，改用錄製。錄製很久，不等它，狀態走事件回來。
+#[tauri::command]
+fn record_item(app: AppHandle, id: u64) {
+    let eng = engine(&app);
+    tauri::async_runtime::spawn(async move { eng.record_item(id).await });
+}
+
+/// 停止錄製。回 false 表示這個項目沒在錄。
+#[tauri::command]
+fn stop_recording(app: AppHandle, id: u64) -> bool {
+    engine(&app).stop_recording(id)
+}
+
 /// 使用者從候選清單挑了另一個：新增一個項目抓它
 #[tauri::command]
 async fn add_candidate(
@@ -203,7 +216,9 @@ fn main() {
             clear_done,
             update_tools,
             retry_with_browser,
-            add_candidate
+            add_candidate,
+            record_item,
+            stop_recording
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 啟動失敗");
