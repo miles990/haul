@@ -130,10 +130,11 @@ fn remove_item(state: State<'_, Arc<Engine>>, id: u64) -> Result<(), String> {
     state.remove(id)
 }
 
-/// 失敗的項目重來一次，同一列同一個 id
+/// 失敗的項目重來一次，同一列同一個 id。async 的理由同 retry_with_browser。
 #[tauri::command]
-fn retry_item(state: State<'_, Arc<Engine>>, id: u64, quality: Option<u32>) -> Result<(), String> {
-    state.start_retry(
+#[allow(clippy::unused_async)]
+async fn retry_item(app: AppHandle, id: u64, quality: Option<u32>) -> Result<(), String> {
+    engine(&app).start_retry(
         id,
         Options {
             max_height: quality,
@@ -201,10 +202,14 @@ async fn update_tools(app: AppHandle) -> Result<String, String> {
 }
 
 /// 萃取失敗的項目改用瀏覽器抓。偵測與下載都很久，不等它，狀態走事件回來。
+///
+/// async：引擎要 spawn 任務，得在 tokio runtime 上。同步 command 跑在主執行緒，
+/// tokio::spawn 會 panic 然後整個 app abort（實測過）。
 #[tauri::command]
-fn retry_with_browser(app: AppHandle, id: u64) {
+#[allow(clippy::unused_async)]
+async fn retry_with_browser(app: AppHandle, id: u64) -> Result<(), String> {
     // 由引擎 spawn 並記下把手，使用者移除這個項目時才取消得掉
-    engine(&app).start_retry_with_browser(id);
+    engine(&app).start_retry_with_browser(id)
 }
 
 /// 讀目前設定（給面板初始化）
@@ -335,8 +340,9 @@ fn native_pick_folder() -> Option<String> {
 
 /// 萃取失敗或偵測不到媒體時，改用錄製。錄製很久，不等它，狀態走事件回來。
 #[tauri::command]
-fn record_item(app: AppHandle, id: u64) {
-    engine(&app).start_record_item(id);
+#[allow(clippy::unused_async)]
+async fn record_item(app: AppHandle, id: u64) -> Result<(), String> {
+    engine(&app).start_record_item(id)
 }
 
 /// 停止錄製。回 false 表示這個項目沒在錄。

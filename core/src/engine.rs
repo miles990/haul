@@ -696,6 +696,7 @@ impl Engine {
         if item.status != "failed" {
             return Err("只有失敗的項目能重試".into());
         }
+        runtime()?;
         self.update(id, |i| {
             i.status = "queued".into();
             i.error = None;
@@ -706,14 +707,14 @@ impl Engine {
             i.total = 0;
             i.secs = None;
         });
-        self.log.info("item.retry", serde_json::json!({ "id": id }));
         let me = self.clone();
         let mode = Mode::parse(&item.kind);
         // 不用 spawn_tracked：真正的下載任務會在 start 裡用同一個 id 註冊，
         // 這層外殼結束時的註銷會把它的把手洗掉
-        tokio::spawn(async move {
+        runtime()?.spawn(async move {
             me.start(id, item.input, mode, opts).await;
         });
+        self.log.info("item.retry", serde_json::json!({ "id": id }));
         Ok(())
     }
 
@@ -1435,9 +1436,11 @@ impl Engine {
     }
 
     /// GUI 用：在背景用瀏覽器重試，任務可被移除取消
-    pub fn start_retry_with_browser(self: &Arc<Self>, id: u64) {
+    pub fn start_retry_with_browser(self: &Arc<Self>, id: u64) -> Result<(), String> {
+        runtime()?;
         let me = self.clone();
         self.spawn_tracked(id, async move { me.retry_with_browser(id).await });
+        Ok(())
     }
 
     async fn browser_release(&self) {
@@ -1596,9 +1599,11 @@ impl Engine {
     }
 
     /// GUI 用：在背景改用錄製，任務可被移除取消
-    pub fn start_record_item(self: &Arc<Self>, id: u64) {
+    pub fn start_record_item(self: &Arc<Self>, id: u64) -> Result<(), String> {
+        runtime()?;
         let me = self.clone();
         self.spawn_tracked(id, async move { me.record_item(id).await });
+        Ok(())
     }
 
     /// 從 GUI 進來：既有的失敗項目改用錄製
@@ -1793,6 +1798,12 @@ fn sweep(staging: &Path) {
             };
         }
     }
+}
+
+/// 要 spawn 任務的入口都先問這個：在 tokio runtime 外面 spawn 會 panic，
+/// 從 GUI 的同步 command 進來時就是這種情況——寧可回錯誤也不要整個 app abort。
+fn runtime() -> Result<tokio::runtime::Handle, String> {
+    tokio::runtime::Handle::try_current().map_err(|_| "內部錯誤：不在執行環境裡".to_string())
 }
 
 /// 項目的 kind 直接對應模式，重試時 `Mode::parse(kind)` 才拿得回同一個模式
