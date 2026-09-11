@@ -712,6 +712,7 @@
       <legend data-i18n="set.tools">工具</legend>
       <button type="button" id="update" data-i18n="set.updateYtdlp" data-i18n-title="set.updateYtdlp.title" title="各站改版時靠這個跟上">更新 yt-dlp</button>
       <button type="button" id="update-app" data-i18n="set.updateApp" data-i18n-title="set.updateApp.title" title="從 GitHub Releases 取得新版">檢查 Haul 更新</button>
+      <span class="note" id="update-app-status"></span>
     </fieldset>
 
     <div class="sheet-actions">
@@ -741,7 +742,7 @@
       'setup.fetching': '首次啟動，正在取得 {tool}{size}',
       'update.go': '更新並重新啟動',
       'update.available': '有新版本 v{v}', 'update.latest': 'Haul 已是最新版',
-      'update.checkFailed': '檢查更新失敗：', 'update.downloading': '正在下載更新…',
+      'update.checkFailed': '檢查更新失敗：', 'update.checking': '正在檢查…', 'update.downloading': '正在下載更新…',
       'update.progress': '正在下載更新 {a}', 'update.progressOf': '正在下載更新 {a} / {b}',
       'update.failed': '更新失敗：',
       'ytdlp.updating': '正在更新 yt-dlp…', 'ytdlp.latest': 'yt-dlp 已是最新版',
@@ -755,7 +756,7 @@
       'stat.detected': '偵測到 {n} 個媒體', 'stat.verified': '已驗證', 'stat.verifiedRec': '已驗證 · 錄製',
       'stat.failed': '失敗',
       'row.copySrc': '點一下複製連結', 'row.copied': '已複製', 'row.copyFailed': '複製失敗',
-      'row.remove': '從列表移除', 'row.retry': '重試', 'row.browser': '用瀏覽器抓',
+      'row.remove': '從列表移除', 'row.retry': '重試', 'row.retryImage': '改用圖片模式重試', 'row.browser': '用瀏覽器抓',
       'row.confirmYes': '移除', 'row.confirmNo': '取消',
       'row.confirmRecording': '還在錄製中，移除會停止並丟掉錄到的內容。',
       'row.confirmActive': '還沒下載完成，移除會取消這次下載。',
@@ -792,7 +793,7 @@
       'setup.fetching': 'First launch, fetching {tool}{size}',
       'update.go': 'Update and restart',
       'update.available': 'Version v{v} is available', 'update.latest': 'Haul is up to date',
-      'update.checkFailed': 'Update check failed: ', 'update.downloading': 'Downloading update…',
+      'update.checkFailed': 'Update check failed: ', 'update.checking': 'Checking…', 'update.downloading': 'Downloading update…',
       'update.progress': 'Downloading update {a}', 'update.progressOf': 'Downloading update {a} / {b}',
       'update.failed': 'Update failed: ',
       'ytdlp.updating': 'Updating yt-dlp…', 'ytdlp.latest': 'yt-dlp is up to date',
@@ -806,7 +807,7 @@
       'stat.detected': '{n} media found', 'stat.verified': 'Verified', 'stat.verifiedRec': 'Verified · recorded',
       'stat.failed': 'Failed',
       'row.copySrc': 'Click to copy the link', 'row.copied': 'Copied', 'row.copyFailed': 'Copy failed',
-      'row.remove': 'Remove from list', 'row.retry': 'Retry', 'row.browser': 'Use browser',
+      'row.remove': 'Remove from list', 'row.retry': 'Retry', 'row.retryImage': 'Retry as images', 'row.browser': 'Use browser',
       'row.confirmYes': 'Remove', 'row.confirmNo': 'Cancel',
       'row.confirmRecording': 'Still recording — removing stops it and discards what was captured.',
       'row.confirmActive': 'Not finished yet — removing cancels this download.',
@@ -915,6 +916,7 @@
       '<span class="why"></span>' +
       '<div class="acts">' +
         '<button type="button" class="act retry" hidden></button>' +
+        '<button type="button" class="act retry-img" hidden></button>' +
         '<button type="button" class="act" hidden></button>' +
         '<button type="button" class="act act2" hidden></button>' +
       '</div>' +
@@ -937,7 +939,8 @@
       fill:  el.querySelector('.meter > i'),
       why:   el.querySelector('.why'),
       retry: el.querySelector('.retry'),
-      act:   el.querySelector('.act:not(.act2):not(.retry)'),
+      retryImg: el.querySelector('.retry-img'),
+      act:   el.querySelector('.act:not(.act2):not(.retry):not(.retry-img)'),
       act2:  el.querySelector('.act2'),
       cands: el.querySelector('.cands'),
     };
@@ -949,8 +952,15 @@
     refs.retry.addEventListener('click', ev => {
       ev.stopPropagation();
       refs.retry.disabled = true;
-      invoke('retry_item', { id: it.id, quality: settings.maxHeight ?? null })
+      invoke('retry_item', { id: it.id, quality: settings.maxHeight ?? null, mode: null })
         .catch(err => { refs.retry.disabled = false; say(String(err), true); });
+    });
+    // 選了影片、其實是一般網頁：一鍵換成圖片模式重跑，不用複製網址重貼
+    refs.retryImg.addEventListener('click', ev => {
+      ev.stopPropagation();
+      refs.retryImg.disabled = true;
+      invoke('retry_item', { id: it.id, quality: settings.maxHeight ?? null, mode: 'image' })
+        .catch(err => { refs.retryImg.disabled = false; say(String(err), true); });
     });
     // act2 身兼「改用錄製」與「停止」，依當下狀態決定送哪個指令
     refs.act2.addEventListener('click', ev => {
@@ -1056,6 +1066,7 @@
         '<span class="stat"></span>' +
         '<button type="button" class="x">×</button>' +
         '<button type="button" class="show"></button>' +
+        '<div class="acts"><button type="button" class="act retry" hidden></button></div>' +
         '<div class="confirm" hidden><span></span>' +
           '<button type="button" class="yes primary"></button>' +
           '<button type="button" class="no"></button></div>' +
@@ -1067,6 +1078,7 @@
       thumb: head.querySelector('.thumb'), img: head.querySelector('.thumb img'),
       name: head.querySelector('.name'), src: head.querySelector('.src'),
       stat: head.querySelector('.stat'), x: head.querySelector('.x'), show: head.querySelector('.show'),
+      retry: head.querySelector('.retry'),
       confirm: head.querySelector('.confirm'), confirmText: head.querySelector('.confirm > span'),
       yes: head.querySelector('.yes'), no: head.querySelector('.no'),
     };
@@ -1096,6 +1108,15 @@
       [...kids.querySelectorAll('.track')].map(k => Number(k.dataset.id)).forEach(id => doRemove(id, rows.get(id).el));
     });
     refs.no.addEventListener('click', ev => { ev.stopPropagation(); refs.confirm.hidden = true; });
+    // 整組重試：只重跑失敗的那些
+    refs.retry.addEventListener('click', ev => {
+      ev.stopPropagation();
+      refs.retry.disabled = true;
+      for (const k of kids.querySelectorAll('.track[data-status="failed"]')) {
+        invoke('retry_item', { id: Number(k.dataset.id), quality: settings.maxHeight ?? null, mode: null })
+          .catch(err => say(String(err), true));
+      }
+    });
     refs.show.addEventListener('click', ev => {
       ev.stopPropagation();
       const first = kids.querySelector('.track[data-status="done"]');
@@ -1126,6 +1147,9 @@
     g.refs.yes.textContent = t('row.confirmYes');
     g.refs.no.textContent = t('row.confirmNo');
     g.refs.show.textContent = revealLabel();
+    g.refs.retry.textContent = t('row.retry');
+    g.refs.retry.hidden = failed === 0;
+    g.refs.retry.disabled = false;
     g.head.title = t('group.toggle');
     let stat = done === kids.length ? t('group.files', { n: kids.length }) : t('group.progress', { d: done, n: kids.length });
     if (failed) stat += ' · ' + t('group.failed', { n: failed });
@@ -1196,6 +1220,7 @@
     refs.src.title = t('row.copySrc');
     refs.x.title = t('row.remove');
     refs.retry.textContent = t('row.retry');
+    refs.retryImg.textContent = t('row.retryImage');
     refs.act.textContent = t('row.browser');
     refs.yes.textContent = t('row.confirmYes');
     refs.no.textContent = t('row.confirmNo');
@@ -1233,6 +1258,9 @@
     // 失敗的都能重試；只有萃取類的失敗才給瀏覽器那顆，401 / 429 / 驗證失敗開瀏覽器也救不了
     refs.retry.hidden = it.status !== 'failed';
     refs.retry.disabled = false;
+    // 引擎在錯誤裡明講「這是一般網頁」時才給這顆
+    refs.retryImg.hidden = !(it.status === 'failed' && it.kind !== 'image' && /改用「圖片」模式/.test(it.error || ''));
+    refs.retryImg.disabled = false;
     refs.act.hidden = !(it.status === 'failed' && it.canBrowser);
     refs.act.disabled = false;
     // act2：錄製中→停止；可改用錄製的失敗→改用錄製（瀏覽器也救不了時是唯一出路）
@@ -1524,6 +1552,7 @@
   }
 
   $('gear').addEventListener('click', async () => {
+    updateStatus.textContent = '';
     fillPanel(await invoke('get_settings'));
     dlg.showModal();
   });
@@ -1587,18 +1616,23 @@
   const updateBar = $('update-bar'), updateText = $('update-text'), updateGo = $('update-go');
 
   // 啟動時靜靜查一次；設定面板手動按的才把「沒有新版／失敗」講出來
+  // 手動按的回饋寫在設定面板裡——面板是 modal，寫到後面的提示列等於沒反應
+  const updateStatus = $('update-app-status');
   async function checkUpdate(manual) {
+    if (manual) { updateStatus.textContent = t('update.checking'); $('update-app').disabled = true; }
     try {
       const u = await invoke('check_update');
       if (u) {
         updateText.textContent = t('update.available', { v: u.version });
         updateBar.hidden = false;
-        if (manual) dlg.close();
+        if (manual) { updateStatus.textContent = ''; dlg.close(); }
       } else if (manual) {
-        say(t('update.latest'), false);
+        updateStatus.textContent = t('update.latest');
       }
     } catch (e) {
-      if (manual) say(t('update.checkFailed') + String(e), true);
+      if (manual) updateStatus.textContent = t('update.checkFailed') + String(e);
+    } finally {
+      $('update-app').disabled = false;
     }
   }
   updateGo.addEventListener('click', async () => {

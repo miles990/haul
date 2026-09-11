@@ -135,13 +135,19 @@ fn remove_item(state: State<'_, Arc<Engine>>, id: u64) -> Result<(), String> {
 /// 失敗的項目重來一次，同一列同一個 id。async 的理由同 retry_with_browser。
 #[tauri::command]
 #[allow(clippy::unused_async)]
-async fn retry_item(app: AppHandle, id: u64, quality: Option<u32>) -> Result<(), String> {
+async fn retry_item(
+    app: AppHandle,
+    id: u64,
+    quality: Option<u32>,
+    mode: Option<String>,
+) -> Result<(), String> {
     engine(&app).start_retry(
         id,
         Options {
             max_height: quality,
             ..Default::default()
         },
+        mode.as_deref().map(Mode::parse),
     )
 }
 

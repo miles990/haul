@@ -701,7 +701,14 @@ impl Engine {
 
     /// 失敗的項目重來一次：同一列、同一個 id，走跟新加入完全相同的路。
     /// 站點改版後 `haul update` 過、或只是網路抖了一下，重試就夠了。
-    pub fn start_retry(self: &Arc<Self>, id: u64, opts: extract::Options) -> Result<(), String> {
+    /// `mode` 給 Some 就換模式重跑（選了影片、其實要的是網頁上的圖，這種情況）；
+    /// None 維持當初的選擇——重試的語意是「同一件事再做一次」。
+    pub fn start_retry(
+        self: &Arc<Self>,
+        id: u64,
+        opts: extract::Options,
+        mode: Option<Mode>,
+    ) -> Result<(), String> {
         let item = self
             .items
             .lock()
@@ -714,8 +721,11 @@ impl Engine {
             return Err("只有失敗的項目能重試".into());
         }
         runtime()?;
+        let mode = mode.unwrap_or_else(|| Mode::parse(&item.kind));
+        let kind = kind_for(mode);
         self.update(id, |i| {
             i.status = "queued".into();
+            i.kind = kind.into();
             i.error = None;
             i.can_browser = false;
             i.can_record = false;
@@ -725,7 +735,6 @@ impl Engine {
             i.secs = None;
         });
         let me = self.clone();
-        let mode = Mode::parse(&item.kind);
         // 不用 spawn_tracked：真正的下載任務會在 start 裡用同一個 id 註冊，
         // 這層外殼結束時的註銷會把它的把手洗掉
         runtime()?.spawn(async move {
@@ -1008,11 +1017,22 @@ impl Engine {
                             Err(e) => Err(anyhow::anyhow!("{yt_err}\n（網頁圖片：{e}）")),
                         }
                     }
-                    // 沒有直接規則時，該讓使用者看到的是 yt-dlp 的原因
-                    Err(_) => Err(match gallery_hint {
-                        Some(h) => anyhow::anyhow!("{yt_err}\n{h}"),
-                        None => yt_err,
-                    }),
+                    // 沒有直接規則時，該讓使用者看到的是 yt-dlp 的原因。
+                    // 但如果它其實是一般網頁，使用者要的多半是頁上的圖——
+                    // 那條路只在圖片模式走，講清楚免得對著「不支援」猜。
+                    Err(probe_err) => {
+                        let mut hints: Vec<String> = gallery_hint.into_iter().collect();
+                        if probe_err.to_string().contains("這是一個網頁") {
+                            hints.push(
+                                "這是一般網頁；若要的是頁上的圖片，改用「圖片」模式重新加入".into(),
+                            );
+                        }
+                        Err(if hints.is_empty() {
+                            yt_err
+                        } else {
+                            anyhow::anyhow!("{yt_err}\n{}", hints.join("\n"))
+                        })
+                    }
                 }
             }
         }
@@ -2353,13 +2373,32 @@ mod tests {
     async fn retry_only_applies_to_failed_items() {
         let eng = fresh_engine("retry-guard");
         let id = eng.push("https://x/q".into(), "q".into(), "video");
-        assert!(eng.start_retry(id, extract::Options::default()).is_err());
+        assert!(eng
+            .start_retry(id, extract::Options::default(), None)
+            .is_err());
         eng.update(id, |i| i.status = "failed".into());
-        assert!(eng.start_retry(id, extract::Options::default()).is_ok());
-        // 重試後那列立刻回到佇列狀態，錯誤清掉
+        assert!(eng
+            .start_retry(id, extract::Options::default(), None)
+            .is_ok());
+        // 重試後那列立刻回到佇列狀態，錯誤清掉，模式維持原樣
         let it = eng.snapshot().into_iter().find(|i| i.id == id).unwrap();
         assert_ne!(it.status, "failed");
         assert!(it.error.is_none());
+        assert_eq!(it.kind, "video");
+    }
+
+    #[tokio::test]
+    async fn retry_can_switch_mode() {
+        let eng = fresh_engine("retry-mode");
+        let id = eng.push("https://x/page".into(), "page".into(), "video");
+        eng.update(id, |i| i.status = "failed".into());
+        eng.start_retry(id, extract::Options::default(), Some(Mode::Image))
+            .unwrap();
+        let it = eng.snapshot().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(
+            it.kind, "image",
+            "換模式重跑要把 kind 一起改，下次重試才會沿用"
+        );
     }
 
     /// 一批圖同時完成時 record 會從不同執行緒同時追加，行不能黏在一起
