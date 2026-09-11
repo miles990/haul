@@ -132,3 +132,6 @@ CLI `--json` 也看得到，agent 可以直接用。
 - **來源網址**：列上顯示、點一下複製。Finder 給不了的那一項資訊。
 - **圖片模式的最後一層**：yt-dlp／gallery-dl／直接抓取都不認得的一般網頁，抓 HTML 挑圖（GitHub README 實測 19 張）。
 - **要 spawn 的 Tauri command 一律 async**：同步 command 在主執行緒跑，`tokio::spawn` 會 panic 把 app 弄掉。
+- **介面語言**：settings.json 的 `language`（zh-TW / en / 跟隨系統），前端字典 + `data-i18n`，切換立即重畫。引擎的錯誤訊息不翻。
+- **來源分階層**：展開出來的項目記 `group / groupTitle / groupUrl`，GUI 收成一個標題列，展開收起；只展開出一項的不算一組。
+- **歷史檔黏行**：`writeln!` 是兩次 write，一批圖同時完成會黏行；改成整行一次 `write_all` 加鎖。

@@ -40,9 +40,11 @@ and hit Add. Files land in `~/Downloads/Haul`.
   (a real Chrome loads the page and Haul intercepts the media request) or **Record**
   (capture the tab's video and audio when there is no file at all).
 - Remove a row with **×**. Removing an unfinished item cancels the download; it asks first.
-- ⚙ **Settings**: output folder, quality cap, concurrency, login source (borrow your
-  browser's cookies — Haul never touches passwords), browser path, recording limit,
-  completion chime.
+- Playlists, galleries and page scrapes are grouped under their source; click the source
+  row to expand or collapse.
+- ⚙ **Settings**: interface language (繁體中文 / English), output folder, quality cap,
+  concurrency, login source (borrow your browser's cookies — Haul never touches
+  passwords), browser path, recording limit, completion chime.
 
 ## CLI
 
