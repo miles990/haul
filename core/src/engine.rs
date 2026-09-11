@@ -222,6 +222,7 @@ pub struct Engine {
     /// append-only 的 NDJSON 歷史。用追加而非覆寫，GUI 與 CLI 同時跑
     /// 也不會互相蓋掉對方的紀錄。
     history: PathBuf,
+    history_lock: Mutex<()>,
     sink: Sink,
     items: Mutex<Vec<Item>>,
     seen: Mutex<HashSet<String>>,
@@ -289,6 +290,7 @@ impl Engine {
             cfg,
             staging,
             history,
+            history_lock: Mutex::new(()),
             sink,
             items: Mutex::new(past),
             // 刻意不用歷史去填 seen：同一個連結想重抓是合理的，
@@ -312,17 +314,20 @@ impl Engine {
     /// 把一筆完成或失敗的紀錄追加到歷史檔
     fn record(&self, item: &Item) {
         use std::io::Write;
-        let Ok(line) = serde_json::to_string(item) else {
+        let Ok(mut line) = serde_json::to_string(item) else {
             return;
         };
+        line.push('\n');
+        // 整行含換行一次 write。之前用 writeln! 其實是兩次 write（內容、換行），
+        // 一批圖同時完成時不同執行緒的行會黏在一起，load_history 解析不了就整行丟掉。
+        // 程序內用鎖排隊；跨程序靠 O_APPEND 下的短寫入是原子的。
+        let _guard = self.history_lock.lock().unwrap();
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.history)
         {
-            // 單一次 writeln 寫一行。O_APPEND 下的短寫入是原子的，
-            // 所以多個程序同時追加不會互相插進對方的行裡。
-            let _ = writeln!(f, "{line}");
+            let _ = f.write_all(line.as_bytes());
         }
     }
 
@@ -2254,6 +2259,36 @@ mod tests {
         let it = eng.snapshot().into_iter().find(|i| i.id == id).unwrap();
         assert_ne!(it.status, "failed");
         assert!(it.error.is_none());
+    }
+
+    /// 一批圖同時完成時 record 會從不同執行緒同時追加，行不能黏在一起
+    #[test]
+    fn concurrent_records_never_merge_lines() {
+        let eng = fresh_engine("concurrent-history");
+        let mut ids = Vec::new();
+        for n in 0..64 {
+            let id = eng.push(format!("https://x/{n}"), format!("t{n}"), "video");
+            let file = eng.out_dir().join(format!("{n}.mp4"));
+            std::fs::write(&file, b"x").unwrap();
+            eng.update(id, |i| {
+                i.status = "done".into();
+                i.path = Some(file.to_string_lossy().to_string());
+            });
+            ids.push(id);
+        }
+        std::thread::scope(|sc| {
+            for id in &ids {
+                let eng = eng.clone();
+                let it = eng.snapshot().into_iter().find(|i| i.id == *id).unwrap();
+                sc.spawn(move || eng.record(&it));
+            }
+        });
+        let text = std::fs::read_to_string(&eng.history).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 64);
+        for l in lines {
+            serde_json::from_str::<Item>(l).expect("每一行都要是一個完整的 JSON");
+        }
     }
 
     #[test]
