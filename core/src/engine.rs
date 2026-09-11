@@ -1407,7 +1407,8 @@ impl Engine {
             title: format!("{title}（錄製）"),
         };
         let stem = format!("{title}（錄製）");
-        self.finish_staged(&tools, id, &job, mode, staged, Some(rec.secs as f64), Some(stem))
+        // 時長讓驗證閘門從檔案解出來：牆鐘時間含載入等待，會多報
+        self.finish_staged(&tools, id, &job, mode, staged, None, Some(stem))
             .await;
     }
 }

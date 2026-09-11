@@ -16,6 +16,8 @@ regex = "1"
 futures-util = "0.3"
 tokio = { version = "1", features = [
     "rt-multi-thread", "macros", "fs", "sync", "time", "process", "io-util",
+    # CLI 的 Ctrl-C 是「停止錄製」而不是砍程序
+    "signal",
 ] }
 # rustls 而非 OpenSSL：Windows 上不需要額外裝任何東西就能編譯
 reqwest = { version = "0.12", default-features = false, features = [

@@ -23,6 +23,7 @@ const HELP: &str = r#"haul — 萬用媒體下載器
   haul status               列出歷史紀錄
   haul logs                 看執行紀錄（診斷失敗用）
   haul update               更新 yt-dlp（站點改版後用）
+  haul record <網址>        錄製分頁的畫面＋聲音（沒有檔案可抓時用；-a 只錄聲音）
 
 選項
   -a, --audio               只要聲音（抽出原始音軌，不重新編碼）
@@ -34,6 +35,8 @@ const HELP: &str = r#"haul — 萬用媒體下載器
                             需要登入的內容用這個。Haul 不碰帳密，只讀 cookie。
       --browser             前三層抓不到時，開一個 Chrome 把頁面跑起來攔截媒體請求
                             （需要機器上有 Chrome / Chromium / Edge / Brave）
+      --max <時長>          錄製上限，例如 30m、2h（預設 3h）。按 Ctrl-C 停止錄製，
+                            會等轉檔與驗證做完才結束
   -o, --out <資料夾>        輸出位置（預設 ~/Downloads/Haul）
   -c, --concurrency <N>     同時下載幾個（預設 3）
   -n, --lines <N>           logs 要看幾則（預設 50）
@@ -52,10 +55,12 @@ const HELP: &str = r#"haul — 萬用媒體下載器
   haul logs --json | jq 'select(.level == "error")'
   haul --cookies chrome https://example.com/private/video
   haul --browser https://example.com/player/123
+  haul record https://example.com/live/room
 "#;
 
 enum Cmd {
     Get,
+    Record,
     Status,
     Logs,
     Update,
@@ -70,6 +75,7 @@ struct Args {
     overwrite: bool,
     cookies_from: Option<String>,
     browser: bool,
+    record_max: Option<std::time::Duration>,
     max_height: Option<u32>,
     out: PathBuf,
     json: bool,
@@ -86,6 +92,7 @@ fn parse() -> Result<Args, String> {
         overwrite: false,
         cookies_from: None,
         browser: false,
+        record_max: None,
         max_height: None,
         out: default_out_dir(),
         json: false,
@@ -104,6 +111,13 @@ fn parse() -> Result<Args, String> {
             "--any" => a.any = true,
             "--overwrite" => a.overwrite = true,
             "--browser" => a.browser = true,
+            "--max" => {
+                let v = it.next().ok_or("--max 後面要接時長，例如 30m、2h")?;
+                a.record_max = Some(
+                    haul_core::browser::record::parse_duration(&v)
+                        .ok_or(format!("看不懂的時長：{v}（可用 90s、30m、2h、1h30m）"))?,
+                );
+            }
             "--cookies" => {
                 let b = it.next().ok_or("--cookies 後面要接瀏覽器名稱")?;
                 if !haul_core::cookies::is_supported(&b) {
@@ -150,6 +164,7 @@ fn parse() -> Result<Args, String> {
                     .parse()
                     .map_err(|_| "--lines 要接數字".to_string())?;
             }
+            "record" if first => a.cmd = Cmd::Record,
             "status" if first => a.cmd = Cmd::Status,
             "logs" if first => a.cmd = Cmd::Logs,
             "update" if first => a.cmd = Cmd::Update,
@@ -166,6 +181,15 @@ fn describe(i: &Item) -> Option<String> {
     let mb = |n: u64| format!("{:.1} MB", n as f64 / 1_048_576.0);
     Some(match i.status.as_str() {
         "resolving" => format!("[{}] 解析中 {}", i.id, i.title),
+        // \r 蓋同一行，不然一秒一行會洗版；下一個狀態換行印
+        "recording" => format!(
+            "\r[{}] ● 錄製中 {}  {:02}:{:02}  {:.1} MB   ",
+            i.id,
+            i.title,
+            (i.secs.unwrap_or(0.0) as u64) / 60,
+            (i.secs.unwrap_or(0.0) as u64) % 60,
+            i.bytes as f64 / 1048576.0
+        ),
         "browser" if i.total > 0 => format!(
             "[{}] 瀏覽器偵測到 {} 個媒體 {}",
             i.id, i.total, i.title
@@ -220,7 +244,7 @@ async fn main() -> ExitCode {
         Cmd::Status => return status(&args),
         Cmd::Logs => return logs(&args),
         Cmd::Update => return update(&args).await,
-        Cmd::Get => {}
+        Cmd::Get | Cmd::Record => {}
     }
 
     if args.urls.is_empty() {
@@ -240,7 +264,7 @@ async fn main() -> ExitCode {
 
     let sink: haul_core::Sink = Arc::new(move |ev: Event| {
         if let Event::Item(i) = &ev {
-            if i.status == "done" || i.status == "failed" || i.status == "browser" {
+            if matches!(i.status.as_str(), "done" | "failed" | "browser" | "recording") {
                 last2.lock().unwrap().insert(i.id, i.status.clone());
             }
         }
@@ -288,6 +312,9 @@ async fn main() -> ExitCode {
     cfg.overwrite = args.overwrite;
     cfg.cookies_from = args.cookies_from.clone();
     cfg.browser_fallback = args.browser;
+    if let Some(m) = args.record_max {
+        cfg.record_max = m;
+    }
 
     let eng = match Engine::new(cfg, sink) {
         Ok(e) => e,
@@ -308,19 +335,36 @@ async fn main() -> ExitCode {
         ..Default::default()
     };
 
-    // 每個輸入各自並行解析，否則清單頁的解析會把後面的輸入卡住
-    let mut outer = Vec::new();
-    for url in args.urls {
-        let e = eng.clone();
-        let opts = opts.clone();
-        outer.push(tokio::spawn(async move {
-            for h in e.add(url, mode, opts).await {
-                let _ = h.await;
+    if matches!(args.cmd, Cmd::Record) {
+        // 錄製一次一個：它是即時的，兩個同時錄沒有意義
+        let url = args.urls[0].clone();
+        let (id, handle) = eng.add_recording(url, mode).await;
+        // Ctrl-C 是停止錄製，不是砍程序：要等轉檔與驗證做完
+        let e2 = eng.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                if !json {
+                    eprintln!("\n停止錄製，轉檔與驗證中…");
+                }
+                e2.stop_recording(id);
             }
-        }));
-    }
-    for h in outer {
-        let _ = h.await;
+        });
+        let _ = handle.await;
+    } else {
+        // 每個輸入各自並行解析，否則清單頁的解析會把後面的輸入卡住
+        let mut outer = Vec::new();
+        for url in args.urls {
+            let e = eng.clone();
+            let opts = opts.clone();
+            outer.push(tokio::spawn(async move {
+                for h in e.add(url, mode, opts).await {
+                    let _ = h.await;
+                }
+            }));
+        }
+        for h in outer {
+            let _ = h.await;
+        }
     }
 
     let (ok, bad) = {

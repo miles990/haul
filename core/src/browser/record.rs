@@ -623,6 +623,77 @@ mod tests {
         remux(&ffmpeg, &webm, &mp4, false, &out.mime).await.unwrap();
         assert!(std::fs::metadata(&mp4).unwrap().len() > 10_240);
     }
+
+    /// 停止訊號真的會讓 record() 停下來（這是 CLI 的 Ctrl-C 與 GUI 的停止鈕
+    /// 背後的機制）。用一頁循環播放、不會自己停的片，只靠訊號停。
+    #[tokio::test]
+    async fn stop_signal_ends_a_recording_of_looping_media() {
+        if std::env::var("HAUL_TEST_CHROME").is_err() {
+            eprintln!("略過：未設 HAUL_TEST_CHROME");
+            return;
+        }
+        let dir = std::env::temp_dir().join("haul-record-test2");
+        std::fs::create_dir_all(&dir).unwrap();
+        let Some(clip) = make_clip(&dir) else {
+            eprintln!("略過：沒有 ffmpeg");
+            return;
+        };
+        // loop 播放，MediaEnded 永遠不會觸發，只有停止訊號能結束
+        let (base, _srv) = loop_server(std::fs::read(&clip).unwrap());
+
+        let exe = super::super::chrome::find(None).unwrap();
+        let ch = super::super::chrome::launch(&exe, &std::env::temp_dir().join("haul-chrome-test"))
+            .await
+            .unwrap();
+        let cdp = Cdp::connect(&ch.ws_url).await.unwrap();
+
+        let webm = dir.join("rec.webm");
+        let (stop_tx, stop_rx) = watch::channel(false);
+        // 4 秒後按停止
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            let _ = stop_tx.send(true);
+        });
+        let t0 = Instant::now();
+        let out = record(&cdp, &format!("{base}/"), false, &webm, Duration::from_secs(3600), stop_rx, |_, _| {})
+            .await
+            .unwrap();
+        let elapsed = t0.elapsed();
+        let _ = cdp.call(None, "Browser.close", json!({})).await;
+
+        assert_eq!(out.stop, Stop::User, "停止訊號應該讓它以 User 結束");
+        assert!(elapsed < Duration::from_secs(20), "上限 1 小時，卻等了 {elapsed:?}，訊號沒生效");
+        assert!(out.bytes > 10_240);
+    }
+
+    fn loop_server(clip: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let page = format!(
+            "<!doctype html><title>Loop</title><video autoplay loop muted src=\"{base}/clip.mp4\"></video>"
+        );
+        let h = std::thread::spawn(move || {
+            for _ in 0..64 {
+                let Ok((mut s, _)) = l.accept() else { break };
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let (ct, body): (&str, &[u8]) = if req.contains("/clip.mp4") {
+                    ("video/mp4", &clip)
+                } else {
+                    ("text/html", page.as_bytes())
+                };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(body);
+            }
+        });
+        (base, h)
+    }
 }
 
 #[cfg(test)]
