@@ -18,6 +18,7 @@
     --fail:  #c4564b;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
             "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
 
   * { box-sizing: border-box; }
@@ -366,6 +367,89 @@
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; }
   }
+
+  /* ---------------------------------------------------------- 設定面板 */
+
+  dialog#settings {
+    width: min(520px, 92vw);
+    max-height: 88vh;
+    padding: 0;
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--ink);
+  }
+  dialog#settings::backdrop { background: rgba(0, 0, 0, 0.5); }
+
+  .sheet {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px 20px 16px;
+    overflow-y: auto;
+  }
+  .sheet h2 { margin: 0; font-size: 15px; font-weight: 600; }
+
+  .sheet fieldset {
+    border: 1px solid var(--edge);
+    border-radius: 6px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0;
+  }
+  .sheet legend { padding: 0 6px; color: var(--dim); font-size: 12px; }
+
+  .sheet label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+  }
+  .sheet label.check { gap: 8px; }
+  .sheet label.pathrow, .sheet .pathrow { flex-wrap: wrap; }
+
+  .sheet .path {
+    flex: 1;
+    min-width: 120px;
+    color: var(--dim);
+    font: 12px var(--mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+  }
+  .sheet .note { color: var(--dim); font-size: 11.5px; }
+
+  .sheet select, .sheet input[type="number"] {
+    padding: 4px 6px;
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    background: var(--sunk);
+    color: var(--ink);
+    font: 500 12px/1 var(--sans);
+  }
+  .sheet input[type="number"] { width: 64px; }
+
+  .sheet button {
+    padding: 4px 10px;
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    background: var(--panel);
+    color: var(--dim);
+    font: 500 12px/1.4 var(--sans);
+    cursor: pointer;
+  }
+  .sheet button:hover { color: var(--ink); background: #2b3138; }
+  .sheet button.primary { background: var(--lamp); color: #1a1200; border-color: var(--lamp); }
+
+  .sheet-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
 </style>
 </head>
 <body>
@@ -379,14 +463,6 @@
         <button type="button" class="mode on" data-mode="video" role="radio" aria-checked="true">影片</button>
         <button type="button" class="mode" data-mode="audio" role="radio" aria-checked="false">只要聲音</button>
       </div>
-      <select id="cookies" title="需要登入的內容用這個。Haul 不碰帳密，只讀瀏覽器已有的 cookie。">
-        <option value="">不用登入</option>
-        <option value="chrome">Chrome 的登入</option>
-        <option value="firefox">Firefox 的登入</option>
-        <option value="safari">Safari 的登入</option>
-        <option value="edge">Edge 的登入</option>
-        <option value="brave">Brave 的登入</option>
-      </select>
       <button class="primary" id="go">加入佇列</button>
     </div>
   </div>
@@ -405,10 +481,82 @@
 <footer>
   <span id="dest">—</span>
   <span id="tally"></span>
-  <button id="update" title="各站改版時靠這個跟上">更新 yt-dlp</button>
+  <button id="gear" title="設定">⚙</button>
   <button id="reveal">開啟資料夾</button>
   <button id="clear">清掉已完成</button>
 </footer>
+
+<dialog id="settings">
+  <form method="dialog" class="sheet">
+    <h2>設定</h2>
+
+    <fieldset>
+      <legend>下載</legend>
+      <label class="pathrow">輸出資料夾
+        <span id="set-out" class="path">預設</span>
+        <button type="button" id="set-out-pick">選擇…</button>
+        <span class="note">重新啟動後生效</span>
+      </label>
+      <label>畫質上限
+        <select id="set-quality">
+          <option value="">不設限</option>
+          <option value="2160">2160p</option>
+          <option value="1440">1440p</option>
+          <option value="1080">1080p</option>
+          <option value="720">720p</option>
+        </select>
+      </label>
+      <label>同時下載數
+        <input type="number" id="set-concurrency" min="1" max="8">
+        <span class="note">重新啟動後生效</span>
+      </label>
+      <label class="check"><input type="checkbox" id="set-chime-on"> 佇列完成時播放提示音</label>
+      <div class="pathrow" id="chime-file-row">
+        <span id="set-chime-file" class="path">內建提示音</span>
+        <button type="button" id="chime-pick">選檔…</button>
+        <button type="button" id="chime-clear">改回內建</button>
+        <button type="button" id="chime-test">試聽</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>登入</legend>
+      <label>登入狀態來源
+        <select id="set-cookies">
+          <option value="">不用登入</option>
+          <option value="chrome">Chrome</option>
+          <option value="firefox">Firefox</option>
+          <option value="safari">Safari</option>
+          <option value="edge">Edge</option>
+          <option value="brave">Brave</option>
+        </select>
+      </label>
+      <p class="note">Haul 不碰帳密，只借用瀏覽器已有的登入狀態。</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>瀏覽器 / 錄製</legend>
+      <label class="pathrow">瀏覽器路徑
+        <span id="set-browser" class="path">自動偵測</span>
+        <button type="button" id="browser-pick">選擇…</button>
+        <button type="button" id="browser-clear">自動</button>
+      </label>
+      <label>錄製上限（分鐘）
+        <input type="number" id="set-record-max" min="1">
+      </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>工具</legend>
+      <button type="button" id="update" title="各站改版時靠這個跟上">更新 yt-dlp</button>
+    </fieldset>
+
+    <div class="sheet-actions">
+      <button type="button" id="set-cancel">取消</button>
+      <button type="button" id="set-save" class="primary">儲存</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 (() => {
@@ -562,7 +710,13 @@
     if (done)    parts.push(`${done} 完成`);
     if (failed)  parts.push(`${failed} 失敗`);
     tally.textContent = parts.join(' · ');
+
+    // 進行中的數量從 >0 掉到 0：佇列清空了，響一次。
+    // prevRunning 一開始是 null，載入 snapshot 那次不會誤響。
+    if (prevRunning !== null && prevRunning > 0 && running === 0) playChime();
+    prevRunning = running;
   }
+  let prevRunning = null;
 
   function reset(items) {
     rows.clear();
@@ -601,8 +755,13 @@
     if (!text) { input.focus(); return; }
     go.disabled = true;
     try {
-      const cookies = document.getElementById('cookies').value || null;
-      await invoke('add', { text, mode, cookies });
+      // 登入來源與預設畫質從設定面板帶，不再是輸入欄旁的下拉
+      await invoke('add', {
+        text,
+        mode,
+        cookies: settings.cookiesFrom || null,
+        quality: settings.maxHeight ?? null,
+      });
       input.value = '';
     } catch (e) {
       // 後端把「看不懂輸入」當成錯誤回來，顯示在提示位置
@@ -721,7 +880,129 @@
     }
   });
 
+  // ---------------------------------------------------------- 設定面板
+
+  // add 送出時要用的設定，App 啟動與每次存檔後同步
+  let settings = {};
+
+  let audioCtx;
+  function ctx() {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+  }
+  // 內建提示音：兩個短音，純合成，不需資源
+  function beep() {
+    try {
+      const c = ctx(), now = c.currentTime;
+      [880, 1320].forEach((f, i) => {
+        const o = c.createOscillator(), g = c.createGain();
+        o.frequency.value = f; o.connect(g); g.connect(c.destination);
+        const t = now + i * 0.12;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.2, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+        o.start(t); o.stop(t + 0.12);
+      });
+    } catch (_) {}
+  }
+  async function playFile(path) {
+    // 後端讀位元組回 base64，前端解碼播放，不必開 asset protocol 白名單
+    const b64 = await invoke('read_audio', { path });
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const buf = await ctx().decodeAudioData(bytes.buffer);
+    const src = ctx().createBufferSource();
+    src.buffer = buf; src.connect(ctx().destination); src.start();
+  }
+  async function playChime() {
+    if (!settings.chime || !settings.chime.enabled) return;
+    if (!settings.chime.file) return beep();
+    try { await playFile(settings.chime.file); }
+    catch (_) { beep(); } // 檔案不見或解不動就退回內建
+  }
+
+  const dlg = document.getElementById('settings');
+  const $ = id => document.getElementById(id);
+  // 面板上暫存的路徑（按儲存才寫回）
+  let draftChimeFile = null, draftBrowserPath = null, draftOutDir = null;
+
+  function showPath(el, val, fallback) {
+    el.textContent = val || fallback;
+    el.title = val || fallback;
+  }
+
+  function fillPanel(s) {
+    $('set-quality').value = s.maxHeight != null ? String(s.maxHeight) : '';
+    $('set-concurrency').value = s.concurrency;
+    $('set-cookies').value = s.cookiesFrom || '';
+    $('set-record-max').value = Math.round((s.recordMaxSecs || 10800) / 60);
+    $('set-chime-on').checked = !!(s.chime && s.chime.enabled);
+    draftChimeFile = (s.chime && s.chime.file) || null;
+    draftBrowserPath = s.browserPath || null;
+    draftOutDir = s.outDir || null;
+    showPath($('set-out'), s.outDir, '預設（~/Downloads/Haul）');
+    showPath($('set-chime-file'), draftChimeFile, '內建提示音');
+    showPath($('set-browser'), draftBrowserPath, '自動偵測');
+  }
+
+  $('gear').addEventListener('click', async () => {
+    fillPanel(await invoke('get_settings'));
+    dlg.showModal();
+  });
+  $('set-cancel').addEventListener('click', () => dlg.close());
+
+  $('set-out-pick').addEventListener('click', async () => {
+    const path = await invoke('pick_folder');
+    if (path) { draftOutDir = path; showPath($('set-out'), path, '預設（~/Downloads/Haul）'); }
+  });
+
+  $('chime-pick').addEventListener('click', async () => {
+    const path = await invoke('pick_audio_file');
+    if (!path) return;
+    try {
+      await invoke('verify_audio', { path });
+      draftChimeFile = path;
+      showPath($('set-chime-file'), path, '內建提示音');
+      $('set-chime-on').checked = true;
+    } catch (e) { say(String(e), true); }
+  });
+  $('chime-clear').addEventListener('click', () => {
+    draftChimeFile = null;
+    showPath($('set-chime-file'), null, '內建提示音');
+  });
+  $('chime-test').addEventListener('click', async () => {
+    if (draftChimeFile) { try { await playFile(draftChimeFile); return; } catch (_) {} }
+    beep();
+  });
+
+  $('browser-pick').addEventListener('click', async () => {
+    const path = await invoke('pick_audio_file'); // 同一個原生選檔器，選任意檔
+    if (path) { draftBrowserPath = path; showPath($('set-browser'), path, '自動偵測'); }
+  });
+  $('browser-clear').addEventListener('click', () => {
+    draftBrowserPath = null;
+    showPath($('set-browser'), null, '自動偵測');
+  });
+
+  $('set-save').addEventListener('click', async () => {
+    const q = $('set-quality').value;
+    const next = {
+      outDir: draftOutDir,                       // 改了要重啟才生效（見面板上的註記）
+      maxHeight: q ? Number(q) : null,
+      concurrency: Math.max(1, Math.min(8, Number($('set-concurrency').value) || 3)),
+      cookiesFrom: $('set-cookies').value || null,
+      browserPath: draftBrowserPath,
+      recordMaxSecs: Math.max(1, Number($('set-record-max').value) || 180) * 60,
+      chime: { enabled: $('set-chime-on').checked, file: draftChimeFile },
+    };
+    try {
+      await invoke('save_settings', { settings: next });
+      settings = next;
+      dlg.close();
+    } catch (e) { say('存不了設定：' + String(e), true); }
+  });
+
   (async () => {
+    settings = await invoke('get_settings');
     document.getElementById('dest').textContent = await invoke('out_dir');
     reset(await invoke('snapshot'));
     input.focus();

@@ -143,6 +143,12 @@ fn pick_audio_file() -> Option<String> {
     native_pick_audio()
 }
 
+/// 讓使用者用原生對話框挑一個資料夾（輸出位置用），取消回 None。
+#[tauri::command]
+fn pick_folder() -> Option<String> {
+    native_pick_folder()
+}
+
 /// 驗證一個音檔真的能解碼（選到壞檔當場知道，不必等佇列跑完）
 #[tauri::command]
 async fn verify_audio(path: String) -> Result<(), String> {
@@ -203,6 +209,40 @@ if ($d.ShowDialog() -eq 'OK') { Write-Output $d.FileName }"#;
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn native_pick_audio() -> Option<String> {
     None // Linux 桌面環境太雜，先讓使用者自己貼路徑
+}
+
+#[cfg(target_os = "macos")]
+fn native_pick_folder() -> Option<String> {
+    let script = r#"try
+        set f to choose folder with prompt "選一個輸出資料夾"
+        POSIX path of f
+    on error
+        return ""
+    end try"#;
+    let out = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+#[cfg(target_os = "windows")]
+fn native_pick_folder() -> Option<String> {
+    let ps = r#"Add-Type -AssemblyName System.Windows.Forms
+$d = New-Object System.Windows.Forms.FolderBrowserDialog
+if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }"#;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn native_pick_folder() -> Option<String> {
+    None
 }
 
 /// 萃取失敗或偵測不到媒體時，改用錄製。錄製很久，不等它，狀態走事件回來。
@@ -319,6 +359,7 @@ fn main() {
             get_settings,
             save_settings,
             pick_audio_file,
+            pick_folder,
             verify_audio,
             read_audio
         ])
