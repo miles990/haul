@@ -46,7 +46,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU0NEUxQTJGRkYxNUQzNkQKUldSdDB4WC9MeHBPVkJJQzU0MkZ0cWo5ZTM2SXN5Y1ZSUXNuNFpiNjB3eng4SFd3TXU2Ykp2NW8K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY5OEQ5N0I5RDI4NDgzQjgKUldTNGc0VFN1WmVOYVk0N01pTmNHWFA0M2tQcmpveGJxdzBraklad2ZZNTRxeXNqVU43Rk9hd2oK",
       "endpoints": [
         "https://github.com/miles990/haul/releases/latest/download/latest.json"
       ],

@@ -42,8 +42,14 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # updater 的 minisign 私鑰（公鑰在 tauri.conf.json）。沒有它就簽不了更新包，
+          # 已裝的 app 會拒絕安裝。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: --target ${{ matrix.target }}
+          # 產 latest.json 給 app 自我更新用；release 發布後才會從 latest/download 拿得到
+          includeUpdaterJson: true
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-dev-{0}', github.run_number) }}
           releaseName: Haul ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
           releaseBody: |
@@ -52,6 +58,8 @@ jobs:
             兩邊都沒有做程式碼簽章，所以首次開啟需要放行：
             - macOS：於「系統設定 → 隱私權與安全性」按「仍要打開」
             - Windows：SmartScreen 出現時選「更多資訊 → 仍要執行」
+
+            從這版起 app 會自己檢查更新（設定 → 檢查 Haul 更新）；v0.1.0 沒有這個功能，請手動下載一次。
           releaseDraft: true
           prerelease: false
 
