@@ -211,23 +211,43 @@
     font-size: 12.5px;
   }
 
-  /* 同一張列表分兩組：進行中在上、已完成在下。不分頁，只是分組 */
-  .group {
-    margin: 10px 18px 3px;
-    font: 600 11px/1 var(--sans);
-    letter-spacing: 0.06em;
-    color: var(--dim);
+  /* 佇列／已完成兩個分頁。進行中的不該被舊項目淹掉，瀏覽舊項目時也不想看進度 */
+  .tabs {
+    display: flex;
+    gap: 2px;
+    padding: 4px 18px 0;
+    border-bottom: 1px solid var(--edge);
+    background: var(--panel);
   }
+  .tab {
+    padding: 7px 10px 6px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    background: none;
+    color: var(--dim);
+    font: 500 12.5px/1 var(--sans);
+  }
+  .tab:hover:not(.on) { background: none; color: var(--ink); }
+  .tab.on { color: var(--lamp); border-bottom-color: var(--lamp); }
+  .tab b { margin-left: 3px; font-weight: 500; opacity: 0.7; font-variant-numeric: tabular-nums; }
 
   .track {
     flex: none; /* 佇列變長時不要被 flex 壓扁 */
+    position: relative;
     display: grid;
-    grid-template-columns: 48px 1fr auto;
+    grid-template-columns: 48px 1fr auto auto;
     grid-template-rows: auto auto;
     gap: 3px 14px;
     padding: 9px 18px 10px;
     border-bottom: 1px solid #262c33;
+    background: var(--bg);
+    transition: transform 0.15s ease-out, opacity 0.15s;
+    touch-action: pan-y;
   }
+  /* 往左滑掉：拖曳中跟手，放開超過門檻就飛出去 */
+  .track.dragging { transition: none; }
+  .track.gone { transform: translateX(-100%); opacity: 0; }
 
   /* 縮圖：列表要認得出誰是誰。還沒有縮圖時顯示型別圖示 */
   .thumb {
@@ -389,6 +409,39 @@
   .track[data-status="done"]:not([data-missing]):hover .show { visibility: visible; }
   .show:hover { color: var(--ink); }
 
+  /* 移除：滑鼠使用者靠這顆，觸控板用滑的 */
+  .x {
+    grid-column: 4;
+    grid-row: 1;
+    align-self: center;
+    visibility: hidden;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--dim);
+    font: 14px/20px var(--sans);
+    text-align: center;
+  }
+  .track:hover .x { visibility: visible; }
+  .x:hover { background: #2b3138; color: var(--ink); }
+
+  /* 還沒完成就要移除：先問。列內確認，不彈視窗 */
+  .confirm {
+    grid-column: 2 / -1;
+    grid-row: 6;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--lamp);
+  }
+  .confirm[hidden] { display: none; }
+  .confirm button { padding: 2px 9px; font-size: 11.5px; }
+
   /* ---------------------------------------------------------- 狀態列 */
 
   footer {
@@ -536,12 +589,15 @@
   <button type="button" id="update-go" class="primary">更新並重新啟動</button>
 </div>
 
+<nav class="tabs" role="tablist">
+  <button type="button" class="tab on" data-tab="active" role="tab" aria-selected="true">佇列 <b id="n-active">0</b></button>
+  <button type="button" class="tab" data-tab="done" role="tab" aria-selected="false">已完成 <b id="n-done">0</b></button>
+</nav>
+
 <div id="queue">
   <p class="empty" id="empty">佇列是空的。貼上連結就會開始下載。</p>
-  <h2 class="group" id="active-h" hidden>進行中</h2>
   <div id="active"></div>
-  <h2 class="group" id="done-h" hidden>已完成</h2>
-  <div id="done"></div>
+  <div id="done" hidden></div>
 </div>
 
 <footer>
@@ -634,8 +690,8 @@
   const empty = document.getElementById('empty');
   const activeBox = document.getElementById('active');
   const doneBox   = document.getElementById('done');
-  const activeH   = document.getElementById('active-h');
-  const doneH     = document.getElementById('done-h');
+  const nActive   = document.getElementById('n-active');
+  const nDone     = document.getElementById('n-done');
   const REVEAL_LABEL = /Win/.test(navigator.platform) ? '在檔案總管顯示' : '在 Finder 顯示';
   const input = document.getElementById('input');
   const field = document.getElementById('field');
@@ -690,15 +746,24 @@
       '<span class="name"></span>' +
       '<span class="stat"></span>' +
       '<div class="meter"><i></i></div>' +
+      '<button type="button" class="x" title="從列表移除">×</button>' +
       '<button type="button" class="show"></button>' +
       '<span class="why"></span>' +
       '<button type="button" class="act" hidden>用瀏覽器抓</button>' +
       '<button type="button" class="act act2" hidden></button>' +
-      '<div class="cands" hidden></div>';
+      '<div class="cands" hidden></div>' +
+      '<div class="confirm" hidden><span></span>' +
+        '<button type="button" class="yes primary">移除</button>' +
+        '<button type="button" class="no">取消</button></div>';
     const refs = {
       thumb: el.querySelector('.thumb'),
       img:   el.querySelector('.thumb img'),
       show:  el.querySelector('.show'),
+      x:     el.querySelector('.x'),
+      confirm: el.querySelector('.confirm'),
+      confirmText: el.querySelector('.confirm > span'),
+      yes:   el.querySelector('.confirm .yes'),
+      no:    el.querySelector('.confirm .no'),
       name:  el.querySelector('.name'),
       stat:  el.querySelector('.stat'),
       fill:  el.querySelector('.meter > i'),
@@ -724,21 +789,128 @@
       ev.stopPropagation();
       if (el.dataset.path) invoke('reveal_file', { path: el.dataset.path }).catch(err => say(String(err), true));
     });
+    refs.x.addEventListener('click', ev => { ev.stopPropagation(); askRemove(it.id, el, refs); });
+    refs.yes.addEventListener('click', ev => { ev.stopPropagation(); doRemove(it.id, el); });
+    refs.no.addEventListener('click', ev => { ev.stopPropagation(); refs.confirm.hidden = true; });
+    swipeToRemove(it.id, el, refs);
     return { el, refs };
   }
 
-  function updateHeads() {
-    activeH.hidden = activeBox.childElementCount === 0;
-    doneH.hidden = doneBox.childElementCount === 0;
+  const TERMINAL = new Set(['done', 'failed']);
+
+  /* 移除：完成或失敗的直接拿掉；還沒完成的先在列內問一次，因為那等於取消下載 */
+  function askRemove(id, el, refs) {
+    if (TERMINAL.has(el.dataset.status)) return doRemove(id, el);
+    refs.confirmText.textContent = el.dataset.status === 'recording'
+      ? '還在錄製中，移除會停止並丟掉錄到的內容。'
+      : '還沒下載完成，移除會取消這次下載。';
+    refs.confirm.hidden = false;
+    el.style.transform = '';
   }
 
-  /* 依狀態放到對的那一組：進行中依加入順序，已完成新的在上 */
+  function doRemove(id, el) {
+    el.classList.add('gone');
+    invoke('remove_item', { id })
+      .then(() => dropRow(id))
+      .catch(err => { el.classList.remove('gone'); el.style.transform = ''; say(String(err), true); });
+  }
+
+  function dropRow(id) {
+    const row = rows.get(id);
+    if (!row) return;
+    row.el.remove();
+    rows.delete(id);
+    thumbAsked.delete(id);
+    updateTabs();
+    updateTally();
+  }
+
+  /* 往左滑掉。兩條路：指標拖曳（滑鼠、觸控），以及觸控板的兩指橫滑（wheel 的 deltaX） */
+  function swipeToRemove(id, el, refs) {
+    const limit = () => el.clientWidth * 0.35;
+    let drag = null;
+    el.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || e.target.closest('button')) return;
+      drag = { x: e.clientX, y: e.clientY, dx: 0, on: false, pid: e.pointerId };
+    });
+    el.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!drag.on) {
+        if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy)) return;
+        drag.on = true;
+        el.classList.add('dragging');
+        el.setPointerCapture(drag.pid);
+      }
+      drag.dx = Math.min(0, dx);
+      el.style.transform = `translateX(${drag.dx}px)`;
+    });
+    const end = () => {
+      if (!drag) return;
+      const d = drag;
+      drag = null;
+      el.classList.remove('dragging');
+      if (!d.on) return;
+      el.dataset.dragged = '1'; // 緊接著的 click 不要當成「播放」
+      if (-d.dx > limit()) askRemove(id, el, refs);
+      else el.style.transform = '';
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+
+    let acc = 0, settle;
+    el.addEventListener('wheel', e => {
+      if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // 直向捲動照常
+      e.preventDefault();
+      acc = Math.max(0, acc + e.deltaX);                   // 手指往左，deltaX 為正
+      el.classList.add('dragging');
+      el.style.transform = `translateX(${-acc}px)`;
+      clearTimeout(settle);
+      settle = setTimeout(() => {
+        el.classList.remove('dragging');
+        if (acc > limit()) askRemove(id, el, refs);
+        else el.style.transform = '';
+        acc = 0;
+      }, 120);
+    }, { passive: false });
+  }
+
+  // ---------------------------------------------------------- 分頁
+
+  let tab = 'active';
+  const EMPTY_TEXT = {
+    active: '佇列是空的。貼上連結就會開始下載。',
+    done: '還沒有完成的項目。',
+  };
+  function showTab(name) {
+    tab = name;
+    for (const b of document.querySelectorAll('.tab')) {
+      const on = b.dataset.tab === name;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-selected', String(on));
+    }
+    activeBox.hidden = name !== 'active';
+    doneBox.hidden = name !== 'done';
+    updateTabs();
+  }
+  function updateTabs() {
+    nActive.textContent = activeBox.childElementCount;
+    nDone.textContent = doneBox.childElementCount;
+    const box = tab === 'done' ? doneBox : activeBox;
+    empty.textContent = EMPTY_TEXT[tab];
+    empty.hidden = box.childElementCount > 0;
+  }
+  for (const b of document.querySelectorAll('.tab')) {
+    b.addEventListener('click', () => showTab(b.dataset.tab));
+  }
+
+  /* 依狀態放到對的分頁：佇列依加入順序，已完成新的在上 */
   function place(el, status) {
     const box = status === 'done' ? doneBox : activeBox;
     if (el.parentNode !== box) {
       if (status === 'done') box.prepend(el); else box.appendChild(el);
     }
-    updateHeads();
+    updateTabs();
   }
 
   /* 每個項目只問一次縮圖。舊項目（更新前下載的）由後端從原檔補產 */
@@ -758,6 +930,7 @@
   }
 
   function paint(it) {
+    if (it.status === 'removed') return dropRow(it.id);
     let row = rows.get(it.id);
     if (!row) {
       row = makeRow(it);
@@ -767,6 +940,8 @@
 
     el.dataset.status = it.status;
     place(el, it.status);
+    // 狀態變了就把「還沒完成要不要移除」的問句收掉——答案可能已經過期
+    if (TERMINAL.has(it.status)) refs.confirm.hidden = true;
     refs.thumb.dataset.kind = it.kind;
     if (it.status === 'done') loadThumb(it, el, refs);
     refs.name.textContent = it.title || it.input;
@@ -807,7 +982,6 @@
       refs.cands.hidden = true;
     }
 
-    empty.hidden = rows.size > 0;
     updateTally();
   }
 
@@ -838,8 +1012,7 @@
     activeBox.replaceChildren();
     doneBox.replaceChildren();
     items.forEach(paint);
-    empty.hidden = items.length > 0;
-    updateHeads();
+    updateTabs();
     updateTally();
   }
 
@@ -880,6 +1053,7 @@
         quality: settings.maxHeight ?? null,
       });
       input.value = '';
+      showTab('active');
     } catch (e) {
       // 後端把「看不懂輸入」當成錯誤回來，顯示在提示位置
       say(String(e), true);
@@ -916,7 +1090,9 @@
   // 完成的項目點一下就播放。用委派監聽，佇列再長也只有一個 listener。
   queue.addEventListener('click', e => {
     const row = e.target.closest('.track');
-    if (!row || row.dataset.status !== 'done' || !row.dataset.path || row.dataset.missing) return;
+    if (!row) return;
+    if (row.dataset.dragged) { delete row.dataset.dragged; return; } // 剛滑過，不是要播放
+    if (row.dataset.status !== 'done' || !row.dataset.path || row.dataset.missing) return;
     invoke('open_file', { path: row.dataset.path })
       .catch(err => say(String(err), true));
   });

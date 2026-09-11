@@ -238,8 +238,12 @@ where
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // 自己一個 process group，取消時才殺得到 yt-dlp 再 fork 出來的那層
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = cmd.spawn().map_err(|e| anyhow!("啟動 yt-dlp 失敗：{e}"))?;
+    let mut tree = KillTree::new(child.id());
 
     let stdout = child
         .stdout
@@ -311,6 +315,8 @@ where
     }
 
     let status = child.wait().await?;
+    // 正常結束就解除：pid 會被重用，之後再殺會誤傷別的程序
+    tree.disarm();
     if !status.success() {
         bail!("{}", stderr_tail(&errs));
     }
@@ -320,6 +326,42 @@ where
         bail!("yt-dlp 回報的檔案不存在：{}", path.display());
     }
     Ok(Downloaded { path, secs })
+}
+
+/// 下載被取消時把 yt-dlp 的整個程序群收掉。
+///
+/// yt-dlp 的 macOS／Windows 執行檔是 PyInstaller 打包的：外層是 bootloader，
+/// 真正的 Python 是它再 fork 出來的一層。`kill_on_drop` 只殺得到外層，
+/// 裡層會變孤兒把整支影片抓完——所以要殺整個 process group（含它叫起來的 ffmpeg）。
+struct KillTree(Option<u32>);
+
+impl KillTree {
+    fn new(pid: Option<u32>) -> Self {
+        Self(pid)
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for KillTree {
+    fn drop(&mut self) {
+        let Some(pid) = self.0 else { return };
+        #[cfg(unix)]
+        // SAFETY: 純系統呼叫；負數 pid 表示整個 process group，就是 spawn 時 process_group(0) 建的那個
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
+    }
 }
 
 /// 只抓封面圖／縮圖。

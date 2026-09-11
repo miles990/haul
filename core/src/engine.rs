@@ -2156,6 +2156,48 @@ mod tests {
         assert_eq!(eng.browser_users.load(Ordering::SeqCst), 0);
     }
 
+    /// 真的抓一支影片、下載中途移除：任務要停、yt-dlp 子程序要跟著消失。
+    /// 需要網路，設 HAUL_TEST_NET=1 才跑。
+    #[tokio::test]
+    async fn removing_a_real_download_kills_ytdlp() {
+        if std::env::var("HAUL_TEST_NET").is_err() {
+            return;
+        }
+        let eng = fresh_engine("net-remove");
+        // 一支長影片，來得及在下載中途取消
+        let handles = eng
+            .add(
+                "https://www.youtube.com/watch?v=aqz-KE-bpKQ".into(),
+                Mode::Video,
+                extract::Options::default(),
+            )
+            .await;
+        assert_eq!(handles.len(), 1);
+        let id = eng.snapshot()[0].id;
+
+        let mut waited = 0;
+        while eng.snapshot()[0].status != "downloading" {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            waited += 1;
+            assert!(waited < 300, "60 秒內沒進入下載中：{:?}", eng.snapshot()[0]);
+        }
+        let ytdlp_running = || {
+            std::process::Command::new("pgrep")
+                .args(["-f", "aqz-KE-bpKQ"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        assert!(ytdlp_running(), "下載中應該看得到 yt-dlp");
+
+        eng.remove(id).unwrap();
+        let _ = handles.into_iter().next().unwrap().await; // abort 後 join 會回 Err，正常
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!ytdlp_running(), "移除後 yt-dlp 應該被收掉");
+        assert!(eng.snapshot().is_empty());
+        assert!(load_history(&eng.history, 500).is_empty());
+    }
+
     #[test]
     fn only_extract_failures_are_browser_eligible() {
         assert!(browser_eligible("ERROR: Unsupported URL: https://x"));

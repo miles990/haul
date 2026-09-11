@@ -16,3 +16,7 @@ reqwest.workspace = true
 symphonia.workspace = true
 tokio-tungstenite.workspace = true
 base64.workspace = true
+
+# 取消下載時要殺掉 yt-dlp 的整個程序群（PyInstaller 會再 fork 一層）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
