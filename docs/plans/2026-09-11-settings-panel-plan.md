@@ -10,9 +10,9 @@
 
 **慣例：** 同前兩期。`cargo test -p haul-core <名稱>`；一任務一 commit；註解寫「為什麼」。
 
-**兩個明講的取捨：**
-- **同時下載數**改了要重新啟動才生效——執行中的 semaphore 沒辦法安全縮小。面板上這一項標註清楚。
-- **輸出資料夾**做成執行期可改（`out_dir` 從 `&Path` 改成 Mutex 背後的 PathBuf，9 個使用點），因為「改了要重開」對這一項體驗太差。
+**明講的取捨：**
+- **同時下載數**與**輸出資料夾**改了要重新啟動才生效。前者的 semaphore 不能安全縮小；後者的 staging 暫存、歷史檔、以及「同檔案系統才能 rename」都在引擎建構時綁定 out_dir，要真正即時換需要一併搬 staging 與歷史、還要處理跨磁碟 rename——那是比面板大得多的改動，不在這一期。面板上這兩項標「重新啟動後生效」。
+- **即時生效**的是：登入來源、預設畫質、錄製上限、瀏覽器路徑、提示音。畫質是每次 add 帶的、cookie 已有 setter，錄製上限與瀏覽器路徑加 setter（在錄製／開瀏覽器時才讀，不碰 staging）。
 
 ---
 
@@ -179,73 +179,65 @@ git commit -m "設定：settings.json 的結構、預設值與讀寫"
 
 ---
 
-### Task 2: engine — out_dir 執行期可改、record_max / browser_path runtime setter
+### Task 2: engine — record_max / browser_path 執行期可改
 
 **Files:**
 - Modify: `core/src/engine.rs`
 
-`cookies_from` 已經是 runtime setter 的樣板。把 `out_dir` 從固定 `cfg.out_dir` 改成 Mutex 背後的值；`record_max`、`browser_path` 也加 setter。
+`cookies_from` 已經是 runtime setter 的樣板。`record_max` 與 `browser_path` 在錄製／開瀏覽器時才讀，加同樣的 Mutex setter；`out_dir` **不**動（見上面的取捨，改了重新啟動生效）。
 
 **Step 1: 寫失敗的測試**
 
 ```rust
     #[test]
-    fn out_dir_is_runtime_settable() {
-        let dir = std::env::temp_dir().join("haul-engine-outdir");
+    fn record_max_and_browser_path_are_runtime_settable() {
+        let dir = std::env::temp_dir().join("haul-engine-rt");
         let eng = Engine::new(
-            Config::new(dir.join("a"), default_bin_dir()),
+            Config::new(dir, default_bin_dir()),
             std::sync::Arc::new(|_| {}),
         )
         .unwrap();
-        assert!(eng.out_dir().ends_with("a"));
-        eng.set_out_dir(dir.join("b"));
-        assert!(eng.out_dir().ends_with("b"));
+        eng.set_record_max(600);
+        assert_eq!(eng.record_max().as_secs(), 600);
+        eng.set_browser_path(Some(std::path::PathBuf::from("/x/chrome")));
+        assert_eq!(eng.browser_path(), Some(std::path::PathBuf::from("/x/chrome")));
     }
 ```
 
 **Step 2: 跑測試確認失敗**
 
-Run: `cargo test -p haul-core out_dir_is_runtime`
-Expected: 編譯錯誤（`set_out_dir` 不存在）。
+Run: `cargo test -p haul-core record_max_and_browser`
+Expected: 編譯錯誤。
 
 **Step 3: 實作**
 
 `Engine` 加欄位：
 
 ```rust
-    /// 輸出資料夾。做成執行期可改：使用者在設定裡換資料夾，不該逼他重開 app
-    out_dir: Mutex<PathBuf>,
-    /// 執行期可改的錄製上限與瀏覽器路徑（同 cookies_from 的作法）
+    /// 執行期可改的錄製上限與瀏覽器路徑（同 cookies_from 的作法）。
+    /// 在錄製／開瀏覽器時才讀，不碰 staging，所以能安全即時換。
     record_max: Mutex<Duration>,
     browser_path: Mutex<Option<PathBuf>>,
 ```
 
-`new()` 初始化：`out_dir: Mutex::new(cfg.out_dir.clone())`、`record_max: Mutex::new(cfg.record_max)`、`browser_path: Mutex::new(cfg.browser_path.clone())`。
-
-改 `out_dir()`：
+`new()` 初始化 `record_max: Mutex::new(cfg.record_max)`、`browser_path: Mutex::new(cfg.browser_path.clone())`。加：
 
 ```rust
-    /// 目前的輸出資料夾。回 owned 是因為它在 Mutex 後面。
-    pub fn out_dir(&self) -> PathBuf {
-        self.out_dir.lock().unwrap().clone()
+    pub fn record_max(&self) -> Duration {
+        *self.record_max.lock().unwrap()
     }
-
-    pub fn set_out_dir(&self, dir: PathBuf) {
-        *self.out_dir.lock().unwrap() = dir;
-    }
-
     pub fn set_record_max(&self, secs: u64) {
-        *self.record_max.lock().unwrap() = Duration::from_secs(secs);
+        *self.record_max.lock().unwrap() = Duration::from_secs(secs.max(1));
     }
-
+    pub fn browser_path(&self) -> Option<PathBuf> {
+        self.browser_path.lock().unwrap().clone()
+    }
     pub fn set_browser_path(&self, path: Option<PathBuf>) {
         *self.browser_path.lock().unwrap() = path;
     }
 ```
 
-把 engine.rs 裡所有 `self.cfg.out_dir`（9 處）改成 `self.out_dir()`（先綁 `let out = self.out_dir();` 再用，避免一行多次鎖）。`self.cfg.record_max` → `*self.record_max.lock().unwrap()`。`self.cfg.browser_path.as_deref()` → 先 clone 出來再用。
-
-> 注意：`out_dir()` 現在回 `PathBuf` 不是 `&Path`，Tauri 的 `out_dir` 指令與 `open_out_dir` 要跟著改（Task 4）。搜尋所有呼叫端。
+把 `browser_session()` 裡的 `browser::chrome::find(self.cfg.browser_path.as_deref())` 改成先 `let bp = self.browser_path();` 再 `find(bp.as_deref())`。`run_recording` 裡的 `self.cfg.record_max` 改成 `self.record_max()`。
 
 **Step 4: 建置與測試**
 
@@ -256,7 +248,7 @@ Expected: 全過。
 
 ```bash
 git add core/src/engine.rs
-git commit -m "引擎：out_dir 執行期可改，record_max / browser_path 加 setter"
+git commit -m "引擎：record_max / browser_path 執行期可改"
 ```
 
 ---
@@ -351,9 +343,9 @@ fn save_settings(app: AppHandle, path: State<'_, PathBuf>, settings: Settings) -
     settings.save(&path).map_err(|e| e.to_string())?;
     let eng = engine(&app);
     eng.set_cookies_from(settings.cookies_from.clone());
-    eng.set_out_dir(settings.out_dir.clone().unwrap_or_else(default_out_dir));
     eng.set_record_max(settings.record_max_secs);
     eng.set_browser_path(settings.browser_path.clone());
+    // out_dir 與 concurrency 存了但不即時套用：見計畫的取捨，重新啟動才生效
     Ok(())
 }
 
@@ -435,7 +427,7 @@ fn native_pick_audio() -> Option<String> {
 **Step 3: 建置**
 
 Run: `cargo build --workspace`
-Expected: 成功（`out_dir` 指令改回傳 String：`state.out_dir().to_string_lossy().into_owned()`；`open_out_dir` 用 `state.out_dir()` 的 PathBuf）。
+Expected: 成功（`out_dir()` 仍回 `&Path`，Tauri 指令不變）。
 
 **Step 4: Commit**
 
@@ -608,7 +600,7 @@ git commit -m "文件：設定面板"
 ## 完成標準
 
 - `cargo test --workspace` 全過；`cargo clippy --workspace` 無警告
-- GUI：齒輪開面板、改設定存檔、重開 app 設定還在；輸出資料夾即時生效、同時下載數標「重新啟動後生效」
+- GUI：齒輪開面板、改設定存檔、重開 app 設定還在；登入來源／畫質／錄製上限／瀏覽器路徑即時生效，輸出資料夾與同時下載數標「重新啟動後生效」
 - 提示音：佇列全部完成響一次；內建與自訂音檔都可；自訂選到壞檔當場擋下
 - 登入來源從輸入欄旁搬進面板後，`add` 仍正確帶 cookie
 - jsdom 前端測試（設定、前兩期）全過；GUI 啟動不崩
