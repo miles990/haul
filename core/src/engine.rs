@@ -62,6 +62,14 @@ pub struct Item {
     /// 縮圖的完整路徑（`.haul-thumbs/` 裡）。沒有就是產不出來（無封面的音樂、PDF）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumb: Option<String>,
+    /// 從清單／圖庫／網頁展開出來的項目：來源那個輸入的 id。GUI 據此把同一個
+    /// 來源的收在一起；標題與網址一起記，重開 app 後不必再問一次來源。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_url: Option<String>,
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -475,6 +483,9 @@ impl Engine {
             can_record: false,
             source: None,
             thumb: None,
+            group: None,
+            group_title: None,
+            group_url: None,
         };
         let id = item.id;
         self.items.lock().unwrap().push(item.clone());
@@ -773,26 +784,7 @@ impl Engine {
                 jobs.push((id, job));
             }
             Resolution::Playlist { title, items } => {
-                self.update(id, |i| i.title = format!("{title}（清單）"));
-                let mut first = true;
-                for (job, label) in items {
-                    let key = match &job {
-                        Job::Ytdlp { url } => url.clone(),
-                        Job::Direct { media, .. } | Job::Browser { media, .. } => media.clone(),
-                        Job::Recording { title } => title.clone(),
-                    };
-                    if !self.seen.lock().unwrap().insert(key.clone()) {
-                        continue;
-                    }
-                    if first {
-                        first = false;
-                        self.update(id, |i| i.title = label);
-                        jobs.push((id, job));
-                    } else {
-                        let nid = self.push(key, label, kind);
-                        jobs.push((nid, job));
-                    }
-                }
+                jobs = self.expand(id, &input, kind, title, items);
                 if jobs.is_empty() {
                     self.update(id, |i| {
                         i.status = "done".into();
@@ -833,6 +825,46 @@ impl Engine {
                 })
             })
             .collect()
+    }
+
+    /// 把清單／圖庫／網頁展開成一項一項。第一項沿用來源的 id（那一列已經在
+    /// 畫面上了），其餘新建；每一項都記下來源，GUI 才能收在一起。
+    fn expand(
+        &self,
+        id: u64,
+        input: &str,
+        kind: &str,
+        title: String,
+        items: Vec<(Job, String)>,
+    ) -> Vec<(u64, Job)> {
+        let mut jobs = Vec::new();
+        let mut first = true;
+        for (job, label) in items {
+            let key = match &job {
+                Job::Ytdlp { url } => url.clone(),
+                Job::Direct { media, .. } | Job::Browser { media, .. } => media.clone(),
+                Job::Recording { title } => title.clone(),
+            };
+            if !self.seen.lock().unwrap().insert(key.clone()) {
+                continue;
+            }
+            let item_id = if first {
+                first = false;
+                id
+            } else {
+                self.push(key.clone(), label.clone(), kind)
+            };
+            let (t, u) = (title.clone(), input.to_string());
+            self.update(item_id, |i| {
+                i.input = key;
+                i.title = label;
+                i.group = Some(id);
+                i.group_title = Some(t);
+                i.group_url = Some(u);
+            });
+            jobs.push((item_id, job));
+        }
+        jobs
     }
 
     /// 決定一個輸入該怎麼抓
@@ -2137,6 +2169,40 @@ mod tests {
             can_record: false,
             source: None,
             thumb: None,
+            group: None,
+            group_title: None,
+            group_url: None,
+        }
+    }
+
+    #[test]
+    fn expanded_items_remember_their_source() {
+        let eng = fresh_engine("expand");
+        let id = eng.push("https://x/page".into(), "page".into(), "image");
+        let items = vec![
+            (job_direct("https://x/a.png"), "a".to_string()),
+            (job_direct("https://x/b.png"), "b".to_string()),
+        ];
+        let jobs = eng.expand(id, "https://x/page", "image", "My Page".into(), items);
+        assert_eq!(jobs.len(), 2);
+        let snap = eng.snapshot();
+        assert_eq!(snap.len(), 2, "第一個沿用來源的 id，其餘新建");
+        for it in &snap {
+            assert_eq!(it.group, Some(id));
+            assert_eq!(it.group_title.as_deref(), Some("My Page"));
+            assert_eq!(it.group_url.as_deref(), Some("https://x/page"));
+        }
+        // 每一列的 input 都是自己那個檔的網址，來源網址在 group_url
+        assert_eq!(snap[0].input, "https://x/a.png");
+        assert_eq!(snap[1].input, "https://x/b.png");
+    }
+
+    fn job_direct(url: &str) -> Job {
+        Job::Direct {
+            media: url.into(),
+            title: "t".into(),
+            content_type: None,
+            subdir: None,
         }
     }
 

@@ -125,7 +125,7 @@ fn is_junk(url: &str) -> bool {
 }
 
 fn stem_of(url: &Url) -> Option<String> {
-    let last = url.path_segments()?.filter(|s| !s.is_empty()).next_back()?;
+    let last = url.path_segments()?.rfind(|s| !s.is_empty())?;
     let stem = last.rsplit_once('.').map(|(s, _)| s).unwrap_or(last);
     let stem = stem.trim();
     (!stem.is_empty()).then(|| stem.to_string())
