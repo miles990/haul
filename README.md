@@ -2,8 +2,8 @@
 
 English | [繁體中文](README.zh-TW.md)
 
-Paste a link, queue it, download it. Video, audio, images, streams — and every file is
-verified to actually play before it is kept.
+Paste a link, queue it, download it. Video, audio, images and streams, with built-in
+support for AI agents.
 
 Comes as a desktop app (macOS Intel/Apple Silicon, Windows) and a CLI for scripts and
 AI agents. Extraction is delegated to [yt-dlp](https://github.com/yt-dlp/yt-dlp)

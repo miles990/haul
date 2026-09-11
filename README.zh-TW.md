@@ -2,7 +2,7 @@
 
 [English](README.md) | 繁體中文
 
-貼連結、排隊、下載。影片、音樂、圖片、串流都吃，每個檔案都驗證過能播才留下。
+貼連結、排隊、下載。影片、音樂、圖片、串流都吃，也給 AI agent 用。
 
 有桌面 app（macOS Intel／Apple Silicon、Windows），也有給腳本與 AI agent 用的
 命令列。萃取交給 [yt-dlp](https://github.com/yt-dlp/yt-dlp)（約 1800 個站），
