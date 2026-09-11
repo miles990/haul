@@ -201,6 +201,10 @@ pub struct Engine {
     browser_users: AtomicUsize,
     /// 進行中的錄製，id → 停止訊號
     recordings: Mutex<HashMap<u64, tokio::sync::watch::Sender<bool>>>,
+    /// 執行期可改的錄製上限與瀏覽器路徑（同 cookies_from 的作法）。
+    /// 在錄製／開瀏覽器時才讀，不碰 staging，所以能安全即時換。
+    record_max: Mutex<Duration>,
+    browser_path: Mutex<Option<PathBuf>>,
     log: Logger,
     dl: Semaphore,
     vf: Semaphore,
@@ -223,6 +227,8 @@ impl Engine {
             .connect_timeout(Duration::from_secs(15))
             .build()?;
         let cfg_cookies = cfg.cookies_from.clone();
+        let cfg_record_max = cfg.record_max;
+        let cfg_browser_path = cfg.browser_path.clone();
 
         let log = Logger::new(&cfg.log_dir)?;
         log.info(
@@ -253,6 +259,8 @@ impl Engine {
             browser: tokio::sync::Mutex::new(None),
             browser_users: AtomicUsize::new(0),
             recordings: Mutex::new(HashMap::new()),
+            record_max: Mutex::new(cfg_record_max),
+            browser_path: Mutex::new(cfg_browser_path),
             next_id: AtomicU64::new(next),
         }))
     }
@@ -433,6 +441,22 @@ impl Engine {
             *cur = browser;
             *self.cookie_file.lock().unwrap() = None;
         }
+    }
+
+    pub fn record_max(&self) -> Duration {
+        *self.record_max.lock().unwrap()
+    }
+
+    pub fn set_record_max(&self, secs: u64) {
+        *self.record_max.lock().unwrap() = Duration::from_secs(secs.max(1));
+    }
+
+    pub fn browser_path(&self) -> Option<PathBuf> {
+        self.browser_path.lock().unwrap().clone()
+    }
+
+    pub fn set_browser_path(&self, path: Option<PathBuf>) {
+        *self.browser_path.lock().unwrap() = path;
     }
 
     fn browser(&self) -> Option<String> {
@@ -1112,8 +1136,8 @@ impl Engine {
             // 使用者把整個瀏覽器關了：丟掉舊的重開
             *guard = None;
         }
-        let exe = browser::chrome::find(self.cfg.browser_path.as_deref())
-            .map_err(|e| e.to_string())?;
+        let bp = self.browser_path();
+        let exe = browser::chrome::find(bp.as_deref()).map_err(|e| e.to_string())?;
         // profile 跟 bin/ 平行放在 app 資料夾，不放進 bin/ —— 那裡是工具
         let dir = self
             .cfg
@@ -1345,7 +1369,7 @@ impl Engine {
                 &url,
                 audio_only,
                 &webm,
-                self.cfg.record_max,
+                self.record_max(),
                 rx,
                 |bytes, secs| {
                     self.update(id, |i| {
@@ -1700,6 +1724,16 @@ mod tests {
         assert_eq!(direct_ext("https://x.com/a.mp3", Mode::Audio), "mp3");
         // 圖片模式不受影響
         assert_eq!(direct_ext("https://x.com/a.jpg", Mode::Image), "jpg");
+    }
+
+    #[test]
+    fn record_max_and_browser_path_are_runtime_settable() {
+        let dir = std::env::temp_dir().join("haul-engine-rt");
+        let eng = Engine::new(Config::new(dir, default_bin_dir()), std::sync::Arc::new(|_| {})).unwrap();
+        eng.set_record_max(600);
+        assert_eq!(eng.record_max().as_secs(), 600);
+        eng.set_browser_path(Some(std::path::PathBuf::from("/x/chrome")));
+        assert_eq!(eng.browser_path(), Some(std::path::PathBuf::from("/x/chrome")));
     }
 
     #[test]
