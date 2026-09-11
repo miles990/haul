@@ -431,7 +431,12 @@ mod tests {
         ]);
         assert_eq!(
             got,
-            ["--add-headers", "Referer:https://x/", "--add-headers", "Cookie:a=b"]
+            [
+                "--add-headers",
+                "Referer:https://x/",
+                "--add-headers",
+                "Cookie:a=b"
+            ]
         );
         assert!(header_args(&[]).is_empty());
     }

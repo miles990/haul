@@ -113,11 +113,15 @@ mod tests {
         let dir = std::env::temp_dir().join("haul-settings-test");
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("rt.json");
-        let mut s = Settings::default();
-        s.cookies_from = Some("chrome".into());
-        s.chime.enabled = true;
-        s.chime.file = Some("/tmp/ding.mp3".into());
-        s.language = Some("en".into());
+        let s = Settings {
+            cookies_from: Some("chrome".into()),
+            chime: Chime {
+                enabled: true,
+                file: Some("/tmp/ding.mp3".into()),
+            },
+            language: Some("en".into()),
+            ..Settings::default()
+        };
         s.save(&f).unwrap();
         let back = Settings::load(&f);
         assert_eq!(back.cookies_from.as_deref(), Some("chrome"));

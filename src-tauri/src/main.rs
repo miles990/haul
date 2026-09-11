@@ -116,7 +116,9 @@ async fn thumb(state: State<'_, Arc<Engine>>, id: u64) -> Result<Option<String>,
         return Ok(None);
     };
     let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
-    Ok(Some(base64::engine::general_purpose::STANDARD.encode(bytes)))
+    Ok(Some(
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    ))
 }
 
 #[tauri::command]
@@ -186,7 +188,10 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     u.download_and_install(
         move |chunk, total| {
             got += chunk as u64;
-            let _ = h.emit("update", serde_json::json!({ "bytes": got, "total": total }));
+            let _ = h.emit(
+                "update",
+                serde_json::json!({ "bytes": got, "total": total }),
+            );
         },
         || {},
     )
@@ -220,7 +225,11 @@ fn get_settings(path: State<'_, PathBuf>) -> Settings {
 
 /// 存設定並套用能即時套用的部分。輸出資料夾與同時下載數要重新啟動才生效。
 #[tauri::command]
-fn save_settings(app: AppHandle, path: State<'_, PathBuf>, settings: Settings) -> Result<(), String> {
+fn save_settings(
+    app: AppHandle,
+    path: State<'_, PathBuf>,
+    settings: Settings,
+) -> Result<(), String> {
     settings.save(&path).map_err(|e| e.to_string())?;
     let eng = engine(&app);
     eng.set_cookies_from(settings.cookies_from.clone());

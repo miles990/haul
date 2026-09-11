@@ -427,7 +427,8 @@ impl Engine {
             }
             // 錄製中的順便送停止訊號；Chrome 會在租約歸還時關閉
             self.recordings.lock().unwrap().remove(&id);
-            self.log.info("item.cancelled", serde_json::json!({ "id": id }));
+            self.log
+                .info("item.cancelled", serde_json::json!({ "id": id }));
         } else {
             // 終局狀態的才在歷史裡，才需要 tombstone
             self.record_removed(&item);
@@ -762,9 +763,9 @@ impl Engine {
                 self.fail_ex(id, msg, eligible, eligible);
                 if eligible && self.cfg.browser_fallback {
                     let me = self.clone();
-                    return vec![self.spawn_tracked(id, async move {
-                        me.retry_with_browser(id).await
-                    })];
+                    return vec![
+                        self.spawn_tracked(id, async move { me.retry_with_browser(id).await })
+                    ];
                 }
                 return Vec::new();
             }
@@ -846,7 +847,11 @@ impl Engine {
                     Job::Direct { media, .. } | Job::Browser { media, .. } => media.clone(),
                     Job::Recording { title } => title.clone(),
                 };
-                self.seen.lock().unwrap().insert(key.clone()).then_some((key, job, label))
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .insert(key.clone())
+                    .then_some((key, job, label))
             })
             .collect();
         let grouped = fresh.len() > 1;
@@ -971,8 +976,8 @@ impl Engine {
                     // 只在圖片模式走，影片模式下一個沒有媒體的頁面該讓使用者看到
                     // yt-dlp 的原因並選擇瀏覽器或錄製。
                     Err(_) if mode == Mode::Image => {
-                        let cookie = cookie_file
-                            .and_then(|f| cookies::header_for_host(f, &host_of(input)));
+                        let cookie =
+                            cookie_file.and_then(|f| cookies::header_for_host(f, &host_of(input)));
                         match page_images::scrape(&self.client, input, cookie.as_deref()).await {
                             Ok(page) => {
                                 let sub = sanitize(&page.title);
@@ -1268,9 +1273,7 @@ impl Engine {
                                 ))
                             }
                             Err(ff_err) => {
-                                return Err(format!(
-                                    "驗證未通過：{ff_err}（symphonia：{sym_err}）"
-                                ))
+                                return Err(format!("驗證未通過：{ff_err}（symphonia：{sym_err}）"))
                             }
                         }
                     }
@@ -1418,7 +1421,11 @@ impl Engine {
                     .map(|d| (d.path, d.secs, Some(title.clone())));
                 }
                 let ext = ext_of(media);
-                let ext = if ext.is_empty() { "mp4".to_string() } else { ext };
+                let ext = if ext.is_empty() {
+                    "mp4".to_string()
+                } else {
+                    ext
+                };
                 let raw = self.staging.join(format!("{tag}-raw.{ext}"));
                 direct::download(
                     &self.client,
@@ -1573,8 +1580,7 @@ impl Engine {
 
         let best = sniffed.candidates.best().ok_or_else(|| {
             if sniffed.candidates.saw_segments() {
-                "頁面在播分段串流但沒有清單（JS 自己組的），這種抓不到原檔，可改用錄製"
-                    .to_string()
+                "頁面在播分段串流但沒有清單（JS 自己組的），這種抓不到原檔，可改用錄製".to_string()
             } else {
                 "沒偵測到可下載的媒體。若頁面要按播放才會載入，開著瀏覽器再試一次；否則可改用錄製"
                     .to_string()
@@ -1633,7 +1639,11 @@ impl Engine {
 impl Engine {
     /// 從 CLI 進來：新項目直接錄
     pub async fn add_recording(self: &Arc<Self>, url: String, mode: Mode) -> (u64, JoinHandle<()>) {
-        let kind = if mode == Mode::Audio { "audio" } else { "video" };
+        let kind = if mode == Mode::Audio {
+            "audio"
+        } else {
+            "video"
+        };
         let id = self.push(url.clone(), short(&url), kind);
         let me = self.clone();
         (
@@ -2151,11 +2161,18 @@ mod tests {
     #[test]
     fn record_max_and_browser_path_are_runtime_settable() {
         let dir = std::env::temp_dir().join("haul-engine-rt");
-        let eng = Engine::new(Config::new(dir, default_bin_dir()), std::sync::Arc::new(|_| {})).unwrap();
+        let eng = Engine::new(
+            Config::new(dir, default_bin_dir()),
+            std::sync::Arc::new(|_| {}),
+        )
+        .unwrap();
         eng.set_record_max(600);
         assert_eq!(eng.record_max().as_secs(), 600);
         eng.set_browser_path(Some(std::path::PathBuf::from("/x/chrome")));
-        assert_eq!(eng.browser_path(), Some(std::path::PathBuf::from("/x/chrome")));
+        assert_eq!(
+            eng.browser_path(),
+            Some(std::path::PathBuf::from("/x/chrome"))
+        );
     }
 
     fn sample_item() -> Item {
@@ -2458,7 +2475,9 @@ mod tests {
     #[test]
     fn only_extract_failures_are_browser_eligible() {
         assert!(browser_eligible("ERROR: Unsupported URL: https://x"));
-        assert!(browser_eligible("[Liability] This website is not supported"));
+        assert!(browser_eligible(
+            "[Liability] This website is not supported"
+        ));
         assert!(browser_eligible("不像檔案：text/html"));
         // 這些瀏覽器救不了
         assert!(!browser_eligible("HTTP 401 Unauthorized"));

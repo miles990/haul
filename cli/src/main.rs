@@ -10,11 +10,11 @@ use haul_core::{
     default_bin_dir, default_log_dir, default_out_dir, load_history, log as hlog, Config, Engine,
     Event, Item, Mode, Options,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 const HELP: &str = r#"haul — 萬用媒體下載器
 
@@ -190,10 +190,9 @@ fn describe(i: &Item) -> Option<String> {
             (i.secs.unwrap_or(0.0) as u64) % 60,
             i.bytes as f64 / 1048576.0
         ),
-        "browser" if i.total > 0 => format!(
-            "[{}] 瀏覽器偵測到 {} 個媒體 {}",
-            i.id, i.total, i.title
-        ),
+        "browser" if i.total > 0 => {
+            format!("[{}] 瀏覽器偵測到 {} 個媒體 {}", i.id, i.total, i.title)
+        }
         "browser" => format!(
             "[{}] 瀏覽器偵測中（頁面要按播放的話請在視窗裡按） {}",
             i.id, i.title
@@ -264,7 +263,10 @@ async fn main() -> ExitCode {
 
     let sink: haul_core::Sink = Arc::new(move |ev: Event| {
         if let Event::Item(i) = &ev {
-            if matches!(i.status.as_str(), "done" | "failed" | "browser" | "recording") {
+            if matches!(
+                i.status.as_str(),
+                "done" | "failed" | "browser" | "recording"
+            ) {
                 last2.lock().unwrap().insert(i.id, i.status.clone());
             }
         }

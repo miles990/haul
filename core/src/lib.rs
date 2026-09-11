@@ -5,13 +5,13 @@
 
 pub mod browser;
 pub mod cookies;
-pub mod settings;
 pub mod direct;
 pub mod engine;
 pub mod extract;
 pub mod gallery;
 pub mod log;
 pub mod page_images;
+pub mod settings;
 pub mod thumb;
 pub mod tools;
 pub mod verify;

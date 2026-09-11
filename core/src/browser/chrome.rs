@@ -26,8 +26,7 @@ pub fn candidates() -> Vec<PathBuf> {
     {
         let roots = [
             std::env::var("PROGRAMFILES").unwrap_or_else(|_| r"C:\Program Files".into()),
-            std::env::var("PROGRAMFILES(X86)")
-                .unwrap_or_else(|_| r"C:\Program Files (x86)".into()),
+            std::env::var("PROGRAMFILES(X86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into()),
             std::env::var("LOCALAPPDATA").unwrap_or_default(),
         ];
         for root in roots {
@@ -193,7 +192,9 @@ mod tests {
         let exe = find(None).unwrap();
         let dir = std::env::temp_dir().join("haul-chrome-test");
         let chrome = launch(&exe, &dir).await.unwrap();
-        let cdp = super::super::cdp::Cdp::connect(&chrome.ws_url).await.unwrap();
+        let cdp = super::super::cdp::Cdp::connect(&chrome.ws_url)
+            .await
+            .unwrap();
         let v = cdp
             .call(None, "Browser.getVersion", serde_json::json!({}))
             .await

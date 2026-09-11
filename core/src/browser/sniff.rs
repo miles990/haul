@@ -83,15 +83,10 @@ pub fn classify(url: &str, mime: &str, resource_type: &str) -> Option<Kind> {
     if MANIFEST_MIMES.contains(&mime.as_str()) || ext == "m3u8" || ext == "mpd" {
         return Some(Kind::Manifest);
     }
-    if mime == "video/mp2t"
-        || mime == "video/iso.segment"
-        || SEGMENT_EXTS.contains(&ext.as_str())
-    {
+    if mime == "video/mp2t" || mime == "video/iso.segment" || SEGMENT_EXTS.contains(&ext.as_str()) {
         return Some(Kind::Segment);
     }
-    if mime.starts_with("video/")
-        || mime.starts_with("audio/")
-        || FILE_EXTS.contains(&ext.as_str())
+    if mime.starts_with("video/") || mime.starts_with("audio/") || FILE_EXTS.contains(&ext.as_str())
     {
         return Some(Kind::File);
     }
@@ -408,12 +403,7 @@ fn on_event(
                 .and_then(|t| t.parse::<u64>().ok())
                 .or_else(|| header(&resp_headers, "content-length").and_then(|l| l.parse().ok()));
 
-            let headers = keep_headers(
-                req_headers
-                    .get(&rid)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            );
+            let headers = keep_headers(req_headers.get(&rid).map(Vec::as_slice).unwrap_or(&[]));
             Some(Candidate {
                 url,
                 kind,
@@ -446,15 +436,27 @@ mod tests {
             classify("https://x/a?e=1", "application/vnd.apple.mpegurl", "Fetch"),
             Some(Kind::Manifest)
         );
-        assert_eq!(classify("https://x/a.m3u8", "text/plain", "Fetch"), Some(Kind::Manifest));
+        assert_eq!(
+            classify("https://x/a.m3u8", "text/plain", "Fetch"),
+            Some(Kind::Manifest)
+        );
         assert_eq!(
             classify("https://x/a.mpd", "application/dash+xml", "Fetch"),
             Some(Kind::Manifest)
         );
-        assert_eq!(classify("https://x/v.mp4", "video/mp4", "Media"), Some(Kind::File));
-        assert_eq!(classify("https://x/v", "audio/mpeg", "Media"), Some(Kind::File));
+        assert_eq!(
+            classify("https://x/v.mp4", "video/mp4", "Media"),
+            Some(Kind::File)
+        );
+        assert_eq!(
+            classify("https://x/v", "audio/mpeg", "Media"),
+            Some(Kind::File)
+        );
         // 分段：不是可以直接抓的東西，但值得記下來給錯誤訊息用
-        assert_eq!(classify("https://x/seg-12.ts", "video/mp2t", "Fetch"), Some(Kind::Segment));
+        assert_eq!(
+            classify("https://x/seg-12.ts", "video/mp2t", "Fetch"),
+            Some(Kind::Segment)
+        );
         assert_eq!(
             classify("https://x/seg-12.m4s", "application/octet-stream", "Fetch"),
             Some(Kind::Segment)
@@ -465,7 +467,10 @@ mod tests {
             Some(Kind::File)
         );
         assert_eq!(classify("https://x/page", "text/html", "Document"), None);
-        assert_eq!(classify("https://x/app.js", "application/javascript", "Script"), None);
+        assert_eq!(
+            classify("https://x/app.js", "application/javascript", "Script"),
+            None
+        );
     }
 
     #[test]
@@ -615,7 +620,9 @@ mod tests {
         let exe = super::super::chrome::find(None).unwrap();
         let dir = std::env::temp_dir().join("haul-chrome-test");
         let chrome = super::super::chrome::launch(&exe, &dir).await.unwrap();
-        let cdp = super::super::cdp::Cdp::connect(&chrome.ws_url).await.unwrap();
+        let cdp = super::super::cdp::Cdp::connect(&chrome.ws_url)
+            .await
+            .unwrap();
 
         let mut seen = 0;
         let out = sniff(&cdp, &format!("{base}/"), &[], |n| seen = n)
@@ -628,7 +635,9 @@ mod tests {
         assert_eq!(best.kind, Kind::File);
         assert_eq!(best.size, Some(64 * 1024));
         assert!(
-            best.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("referer")),
+            best.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("referer")),
             "{:?}",
             best.headers
         );

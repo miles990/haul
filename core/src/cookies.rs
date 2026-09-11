@@ -251,7 +251,10 @@ mod tests {
         assert!(rows[1].http_only);
         // 0 是 session cookie，不是「1970 年就過期」
         assert_eq!(rows[1].expires, None);
-        assert_eq!((rows[1].name.as_str(), rows[1].value.as_str()), ("token", "xyz"));
+        assert_eq!(
+            (rows[1].name.as_str(), rows[1].value.as_str()),
+            ("token", "xyz")
+        );
     }
 
     #[test]

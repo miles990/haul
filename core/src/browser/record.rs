@@ -6,7 +6,6 @@
 //! 分頁，只有自己擷取自己是零互動的。代價：分頁換頁會殺掉錄製器，所以監聽
 //! pagehide 先停下來，已收到的 chunk 照收尾。
 
-
 use super::cdp::Cdp;
 use anyhow::{anyhow, bail, Result};
 use base64::Engine as _;
@@ -264,18 +263,23 @@ pub async fn record(
     let (target_id, sid) = open(cdp, url).await?;
     cdp.call(Some(&sid), "Page.enable", json!({})).await?;
     cdp.call(Some(&sid), "Runtime.enable", json!({})).await?;
-    cdp.call(Some(&sid), "Runtime.addBinding", json!({ "name": "haulRec" }))
-        .await?;
+    cdp.call(
+        Some(&sid),
+        "Runtime.addBinding",
+        json!({ "name": "haulRec" }),
+    )
+    .await?;
     tokio::time::sleep(SETTLE).await;
 
-    let title = eval_str(cdp, &sid, "document.title").await.unwrap_or_default();
+    let title = eval_str(cdp, &sid, "document.title")
+        .await
+        .unwrap_or_default();
     let supported: Vec<String> = eval_str(cdp, &sid, SUPPORTED_JS)
         .await
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    let mime = pick_mime(audio_only, &supported).ok_or_else(|| {
-        anyhow!("這個瀏覽器的 MediaRecorder 不支援任何可用格式（{supported:?}）")
-    })?;
+    let mime = pick_mime(audio_only, &supported)
+        .ok_or_else(|| anyhow!("這個瀏覽器的 MediaRecorder 不支援任何可用格式（{supported:?}）"))?;
 
     cdp.call(
         Some(&sid),
@@ -302,7 +306,10 @@ pub async fn record(
             }
         }
         if !started && start.elapsed() > START_TIMEOUT {
-            bail!("錄製沒有開始（{}秒內沒收到擷取成功的回報）", START_TIMEOUT.as_secs());
+            bail!(
+                "錄製沒有開始（{}秒內沒收到擷取成功的回報）",
+                START_TIMEOUT.as_secs()
+            );
         }
         // 叫頁面停；最後一個 chunk 與 stopped 事件會跟著來
         if outcome.is_some() && !told_page {
@@ -432,7 +439,10 @@ mod tests {
         let t0 = Instant::now();
         let mut s = StopWhen::new(t0, Duration::from_secs(10));
         assert_eq!(s.check(t0 + Duration::from_secs(9)), None);
-        assert_eq!(s.check(t0 + Duration::from_secs(10)), Some(Stop::MaxDuration));
+        assert_eq!(
+            s.check(t0 + Duration::from_secs(10)),
+            Some(Stop::MaxDuration)
+        );
     }
 
     #[test]
@@ -454,7 +464,10 @@ mod tests {
         s.playing(true, t0 + Duration::from_secs(31));
         s.playing(false, t0 + Duration::from_secs(40));
         assert_eq!(s.check(t0 + Duration::from_secs(44)), None, "安靜不到 5 秒");
-        assert_eq!(s.check(t0 + Duration::from_secs(45)), Some(Stop::MediaEnded));
+        assert_eq!(
+            s.check(t0 + Duration::from_secs(45)),
+            Some(Stop::MediaEnded)
+        );
     }
 
     #[test]
@@ -466,7 +479,10 @@ mod tests {
         s.playing(true, t0 + Duration::from_secs(13)); // 下一首開始
         s.playing(false, t0 + Duration::from_secs(20));
         assert_eq!(s.check(t0 + Duration::from_secs(24)), None);
-        assert_eq!(s.check(t0 + Duration::from_secs(25)), Some(Stop::MediaEnded));
+        assert_eq!(
+            s.check(t0 + Duration::from_secs(25)),
+            Some(Stop::MediaEnded)
+        );
     }
 
     #[test]
@@ -487,9 +503,15 @@ mod tests {
             "video/webm;codecs=vp9,opus".to_string(),
             "video/webm;codecs=h264,opus".to_string(),
         ];
-        assert_eq!(pick_mime(false, &all).unwrap(), "video/webm;codecs=h264,opus");
+        assert_eq!(
+            pick_mime(false, &all).unwrap(),
+            "video/webm;codecs=h264,opus"
+        );
         let vp9 = vec!["video/webm;codecs=vp9,opus".to_string()];
-        assert_eq!(pick_mime(false, &vp9).unwrap(), "video/webm;codecs=vp9,opus");
+        assert_eq!(
+            pick_mime(false, &vp9).unwrap(),
+            "video/webm;codecs=vp9,opus"
+        );
         assert!(pick_mime(false, &[]).is_none());
         assert_eq!(
             pick_mime(true, &["audio/webm;codecs=opus".to_string()]).unwrap(),
@@ -533,10 +555,26 @@ mod tests {
         let out = dir.join("clip.mp4");
         let ok = std::process::Command::new(&ffmpeg)
             .args([
-                "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25",
-                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
-                "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100",
+                "-t",
+                "3",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
             ])
             .arg(&out)
             .status()
@@ -656,14 +694,25 @@ mod tests {
             let _ = stop_tx.send(true);
         });
         let t0 = Instant::now();
-        let out = record(&cdp, &format!("{base}/"), false, &webm, Duration::from_secs(3600), stop_rx, |_, _| {})
-            .await
-            .unwrap();
+        let out = record(
+            &cdp,
+            &format!("{base}/"),
+            false,
+            &webm,
+            Duration::from_secs(3600),
+            stop_rx,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
         let elapsed = t0.elapsed();
         let _ = cdp.call(None, "Browser.close", json!({})).await;
 
         assert_eq!(out.stop, Stop::User, "停止訊號應該讓它以 User 結束");
-        assert!(elapsed < Duration::from_secs(20), "上限 1 小時，卻等了 {elapsed:?}，訊號沒生效");
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "上限 1 小時，卻等了 {elapsed:?}，訊號沒生效"
+        );
         assert!(out.bytes > 10_240);
     }
 
@@ -722,12 +771,20 @@ mod spike {
         let page = dir.join("target.html");
         std::fs::write(&page, "<!doctype html><title>Target</title><body>target").unwrap();
         let t = cdp
-            .call(None, "Target.createTarget", json!({"url": format!("file://{}", page.display())}))
+            .call(
+                None,
+                "Target.createTarget",
+                json!({"url": format!("file://{}", page.display())}),
+            )
             .await
             .unwrap();
         let tid = t["targetId"].as_str().unwrap().to_string();
         let a = cdp
-            .call(None, "Target.attachToTarget", json!({"targetId": tid, "flatten": true}))
+            .call(
+                None,
+                "Target.attachToTarget",
+                json!({"targetId": tid, "flatten": true}),
+            )
             .await
             .unwrap();
         let ts = a["sessionId"].as_str().unwrap().to_string();
@@ -759,10 +816,20 @@ mod spike {
             .unwrap_or_else(|| panic!("getDisplayMedia 失敗：{r}"));
         let out: serde_json::Value = serde_json::from_str(val).unwrap();
         eprintln!("spike（{} ms）: {out}", t0.elapsed().as_millis());
-        assert!(out["video"].as_bool().unwrap(), "沒拿到視訊軌（假設 1/2 不成立）：{out}");
+        assert!(
+            out["video"].as_bool().unwrap(),
+            "沒拿到視訊軌（假設 1/2 不成立）：{out}"
+        );
         assert!(out["audio"].as_bool().unwrap(), "沒拿到音訊軌：{out}");
         assert_eq!(out["surface"], "browser", "選到的不是分頁：{out}");
-        assert!(out["h264"].as_bool().unwrap(), "MediaRecorder 不支援 h264（假設 3 不成立）");
-        assert!(t0.elapsed().as_secs() < 5, "花了 {:?}，八成是跳了選擇框", t0.elapsed());
+        assert!(
+            out["h264"].as_bool().unwrap(),
+            "MediaRecorder 不支援 h264（假設 3 不成立）"
+        );
+        assert!(
+            t0.elapsed().as_secs() < 5,
+            "花了 {:?}，八成是跳了選擇框",
+            t0.elapsed()
+        );
     }
 }
