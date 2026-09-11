@@ -284,6 +284,24 @@
     font-weight: 500;
   }
 
+  /* 來源網址：Finder 給不了的那一項資訊。點一下就複製，不另加按鈕 */
+  .src {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: start;
+    justify-self: start;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl; /* 網址尾巴比開頭有資訊，截開頭不截尾 */
+    text-align: left;
+    font-size: 11.5px;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .src:hover { color: var(--ink); text-decoration: underline; }
+  .src.copied { color: var(--pass); }
   .stat {
     grid-column: 3;
     grid-row: 1;
@@ -305,7 +323,7 @@
      純 CSS 沒有 per-frame 計算 */
   .meter {
     grid-column: 2 / -1;
-    grid-row: 2;
+    grid-row: 3;
     height: 5px;
     background: var(--sunk);
     border-radius: 1px;
@@ -331,7 +349,7 @@
 
   .why {
     grid-column: 2 / -1;
-    grid-row: 3;
+    grid-row: 4;
     font-size: 11.5px;
     color: var(--fail);
     -webkit-user-select: text;
@@ -341,7 +359,7 @@
   /* 萃取失敗但瀏覽器可能救得了：給一顆安靜的行內按鈕，不彈視窗、不自動接手 */
   .act {
     grid-column: 2 / -1;
-    grid-row: 4;
+    grid-row: 5;
     justify-self: start;
     margin-top: 4px;
     padding: 3px 9px;
@@ -359,7 +377,7 @@
   /* 瀏覽器偵測到的候選。自動挑的那個標出來，其餘可以另外抓 */
   .cands {
     grid-column: 2 / -1;
-    grid-row: 5;
+    grid-row: 6;
     margin-top: 4px;
     font-size: 11.5px;
     color: var(--dim);
@@ -431,7 +449,7 @@
   /* 還沒完成就要移除：先問。列內確認，不彈視窗 */
   .confirm {
     grid-column: 2 / -1;
-    grid-row: 6;
+    grid-row: 7;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -744,6 +762,7 @@
     el.innerHTML =
       '<span class="thumb"><img alt=""></span>' +
       '<span class="name"></span>' +
+      '<span class="src" title="點一下複製連結"></span>' +
       '<span class="stat"></span>' +
       '<div class="meter"><i></i></div>' +
       '<button type="button" class="x" title="從列表移除">×</button>' +
@@ -760,6 +779,7 @@
       img:   el.querySelector('.thumb img'),
       show:  el.querySelector('.show'),
       x:     el.querySelector('.x'),
+      src:   el.querySelector('.src'),
       confirm: el.querySelector('.confirm'),
       confirmText: el.querySelector('.confirm > span'),
       yes:   el.querySelector('.confirm .yes'),
@@ -790,6 +810,18 @@
       if (el.dataset.path) invoke('reveal_file', { path: el.dataset.path }).catch(err => say(String(err), true));
     });
     refs.x.addEventListener('click', ev => { ev.stopPropagation(); askRemove(it.id, el, refs); });
+    refs.src.addEventListener('click', async ev => {
+      ev.stopPropagation();
+      if (el.dataset.dragged) return;
+      const url = refs.src.dataset.url;
+      if (await copyText(url)) {
+        refs.src.classList.add('copied');
+        refs.src.textContent = '已複製';
+        setTimeout(() => { refs.src.textContent = url + '\u200E'; refs.src.classList.remove('copied'); }, 900);
+      } else {
+        say('複製失敗', true);
+      }
+    });
     refs.yes.addEventListener('click', ev => { ev.stopPropagation(); doRemove(it.id, el); });
     refs.no.addEventListener('click', ev => { ev.stopPropagation(); refs.confirm.hidden = true; });
     swipeToRemove(it.id, el, refs);
@@ -946,6 +978,11 @@
     if (it.status === 'done') loadThumb(it, el, refs);
     refs.name.textContent = it.title || it.input;
     refs.name.title = it.title || it.input;
+    if (refs.src.dataset.url !== it.input) {
+      refs.src.dataset.url = it.input;
+      // direction: rtl 會把結尾的 / 之類中性字元甩到最前面，補一個 LRM 壓住
+      refs.src.textContent = it.input + '\u200E';
+    }
     refs.stat.textContent = statLine(it);
 
     if (it.status === 'downloading' && it.total > 0) {
@@ -1038,6 +1075,19 @@
       clearTimeout(say.t);
       say.t = setTimeout(() => say(HINT_DEFAULT, false), 5000);
     }
+  }
+
+  // 剪貼簿：WebKit 在使用者手勢裡允許 navigator.clipboard；不行就退回舊招
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (_) {}
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (_) { return false; }
   }
 
   async function submit() {
