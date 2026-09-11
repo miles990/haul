@@ -243,10 +243,8 @@
     border-bottom: 1px solid #262c33;
     background: var(--bg);
     transition: transform 0.15s ease-out, opacity 0.15s;
-    touch-action: pan-y;
   }
-  /* 往左滑掉：拖曳中跟手，放開超過門檻就飛出去 */
-  .track.dragging { transition: none; }
+  /* 移除時往左飛出去 */
   .track.gone { transform: translateX(-100%); opacity: 0; }
 
   /* 縮圖：列表要認得出誰是誰。還沒有縮圖時顯示型別圖示 */
@@ -427,7 +425,7 @@
   .track[data-status="done"]:not([data-missing]):hover .show { visibility: visible; }
   .show:hover { color: var(--ink); }
 
-  /* 移除：滑鼠使用者靠這顆，觸控板用滑的 */
+  /* 移除。試過用滑的，手勢跟捲動打架，收掉只留這顆 */
   .x {
     grid-column: 4;
     grid-row: 1;
@@ -812,7 +810,6 @@
     refs.x.addEventListener('click', ev => { ev.stopPropagation(); askRemove(it.id, el, refs); });
     refs.src.addEventListener('click', async ev => {
       ev.stopPropagation();
-      if (el.dataset.dragged) return;
       const url = refs.src.dataset.url;
       if (await copyText(url)) {
         refs.src.classList.add('copied');
@@ -824,7 +821,6 @@
     });
     refs.yes.addEventListener('click', ev => { ev.stopPropagation(); doRemove(it.id, el); });
     refs.no.addEventListener('click', ev => { ev.stopPropagation(); refs.confirm.hidden = true; });
-    swipeToRemove(it.id, el, refs);
     return { el, refs };
   }
 
@@ -837,14 +833,13 @@
       ? '還在錄製中，移除會停止並丟掉錄到的內容。'
       : '還沒下載完成，移除會取消這次下載。';
     refs.confirm.hidden = false;
-    el.style.transform = '';
   }
 
   function doRemove(id, el) {
     el.classList.add('gone');
     invoke('remove_item', { id })
       .then(() => dropRow(id))
-      .catch(err => { el.classList.remove('gone'); el.style.transform = ''; say(String(err), true); });
+      .catch(err => { el.classList.remove('gone'); say(String(err), true); });
   }
 
   function dropRow(id) {
@@ -855,56 +850,6 @@
     thumbAsked.delete(id);
     updateTabs();
     updateTally();
-  }
-
-  /* 往左滑掉。兩條路：指標拖曳（滑鼠、觸控），以及觸控板的兩指橫滑（wheel 的 deltaX） */
-  function swipeToRemove(id, el, refs) {
-    const limit = () => el.clientWidth * 0.35;
-    let drag = null;
-    el.addEventListener('pointerdown', e => {
-      if (e.button !== 0 || e.target.closest('button')) return;
-      drag = { x: e.clientX, y: e.clientY, dx: 0, on: false, pid: e.pointerId };
-    });
-    el.addEventListener('pointermove', e => {
-      if (!drag) return;
-      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-      if (!drag.on) {
-        if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy)) return;
-        drag.on = true;
-        el.classList.add('dragging');
-        el.setPointerCapture(drag.pid);
-      }
-      drag.dx = Math.min(0, dx);
-      el.style.transform = `translateX(${drag.dx}px)`;
-    });
-    const end = () => {
-      if (!drag) return;
-      const d = drag;
-      drag = null;
-      el.classList.remove('dragging');
-      if (!d.on) return;
-      el.dataset.dragged = '1'; // 緊接著的 click 不要當成「播放」
-      if (-d.dx > limit()) askRemove(id, el, refs);
-      else el.style.transform = '';
-    };
-    el.addEventListener('pointerup', end);
-    el.addEventListener('pointercancel', end);
-
-    let acc = 0, settle;
-    el.addEventListener('wheel', e => {
-      if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // 直向捲動照常
-      e.preventDefault();
-      acc = Math.max(0, acc + e.deltaX);                   // 手指往左，deltaX 為正
-      el.classList.add('dragging');
-      el.style.transform = `translateX(${-acc}px)`;
-      clearTimeout(settle);
-      settle = setTimeout(() => {
-        el.classList.remove('dragging');
-        if (acc > limit()) askRemove(id, el, refs);
-        else el.style.transform = '';
-        acc = 0;
-      }, 120);
-    }, { passive: false });
   }
 
   // ---------------------------------------------------------- 分頁
@@ -1140,9 +1085,7 @@
   // 完成的項目點一下就播放。用委派監聽，佇列再長也只有一個 listener。
   queue.addEventListener('click', e => {
     const row = e.target.closest('.track');
-    if (!row) return;
-    if (row.dataset.dragged) { delete row.dataset.dragged; return; } // 剛滑過，不是要播放
-    if (row.dataset.status !== 'done' || !row.dataset.path || row.dataset.missing) return;
+    if (!row || row.dataset.status !== 'done' || !row.dataset.path || row.dataset.missing) return;
     invoke('open_file', { path: row.dataset.path })
       .catch(err => say(String(err), true));
   });
