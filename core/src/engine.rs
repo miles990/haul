@@ -574,6 +574,7 @@ impl Engine {
             .map(|(item_id, job)| {
                 let me = self.clone();
                 let tools = tools.clone();
+                let opts = opts.clone();
                 tokio::spawn(async move { me.run(tools, item_id, job, mode, opts).await })
             })
             .collect()
@@ -942,9 +943,8 @@ impl Engine {
                 tools,
                 url,
                 mode,
-                opts,
+                &opts,
                 self.browser().as_deref(),
-                &[],
                 &self.staging,
                 progress,
             )
@@ -1010,13 +1010,16 @@ impl Engine {
                     }),
                 );
                 if *manifest {
+                    let opts = extract::Options {
+                        headers: headers.clone(),
+                        ..opts
+                    };
                     return extract::download(
                         tools,
                         media,
                         mode,
-                        opts,
+                        &opts,
                         None,
-                        headers,
                         &self.staging,
                         progress,
                     )

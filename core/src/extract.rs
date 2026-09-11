@@ -51,10 +51,13 @@ impl Mode {
 }
 
 /// 下載選項。放成結構是為了之後加東西不用一直改函式簽章。
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Options {
     /// 畫質上限（像素高度）。None 表示不設限。
     pub max_height: Option<u32>,
+    /// 額外的請求 header。瀏覽器層攔到的 Referer / Cookie 要原樣帶去重放，
+    /// 否則 CDN 認不得這個請求。
+    pub headers: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -176,9 +179,8 @@ pub async fn download<F>(
     tools: &Tools,
     url: &str,
     mode: Mode,
-    opts: Options,
+    opts: &Options,
     browser: Option<&str>,
-    headers: &[(String, String)],
     staging: &Path,
     mut on_progress: F,
 ) -> Result<Downloaded>
@@ -188,7 +190,7 @@ where
     let mut cmd = Command::new(&tools.ytdlp);
     base_args(&mut cmd);
     cookie_args(&mut cmd, browser);
-    cmd.args(header_args(headers));
+    cmd.args(header_args(&opts.headers));
     cmd.args([
         "--newline",
         "--no-playlist",
@@ -402,6 +404,7 @@ mod tests {
         // 沒有任何格式符合上限時，寧可下載得到也不要整個失敗
         let opts = Options {
             max_height: Some(1080),
+            ..Default::default()
         };
         let f = match opts.max_height {
             Some(h) => format!("bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"),

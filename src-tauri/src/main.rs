@@ -53,6 +53,7 @@ fn add(
     let mode = Mode::parse(&mode);
     let opts = Options {
         max_height: quality,
+        ..Default::default()
     };
     let eng = engine(&app);
 
@@ -65,6 +66,7 @@ fn add(
     let n = inputs.len();
     for input in inputs {
         let e = eng.clone();
+        let opts = opts.clone();
         tauri::async_runtime::spawn(async move {
             e.add(input, mode, opts).await;
         });

@@ -281,12 +281,14 @@ async fn main() -> ExitCode {
     let mode = args.mode;
     let opts = Options {
         max_height: args.max_height,
+        ..Default::default()
     };
 
     // 每個輸入各自並行解析，否則清單頁的解析會把後面的輸入卡住
     let mut outer = Vec::new();
     for url in args.urls {
         let e = eng.clone();
+        let opts = opts.clone();
         outer.push(tokio::spawn(async move {
             for h in e.add(url, mode, opts).await {
                 let _ = h.await;
