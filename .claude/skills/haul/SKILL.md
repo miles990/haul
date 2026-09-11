@@ -140,5 +140,6 @@ cd <haul repo> && cargo build --release --workspace
 | 執行紀錄 | `~/Library/Application Support/com.haul.desktop/logs/haul.log`（4MB 輪替、保留 3 份） |
 | yt-dlp / ffmpeg | 同上目錄的 `bin/` |
 | 匯出的 cookie | 同上目錄的 `bin/cookies.txt`（權限 600，等同登入憑證，不要貼出來） |
+| GUI 設定 | app 資料夾的 `settings.json`（只有 GUI 讀寫；CLI 的旗標只影響單次執行，不碰它） |
 
 紀錄跟著安裝走而不是跟著 `-o` 走——診斷時不必回想當初輸出到哪個資料夾。

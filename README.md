@@ -29,8 +29,11 @@ workflow 只建了主機架構，已修正，下個版本起會是真正的 univ
 
 完成的項目**點一下就用系統播放器開啟**。歷史會保留，重開 app 仍看得到。
 
-需要登入才看得到的內容，在輸入欄旁邊選「Chrome 的登入」（或 Firefox、Safari…），
-Haul 會借用那個瀏覽器已經有的登入狀態。詳見下面的「登入」。
+右下角的 **⚙ 設定**收了輸出資料夾、畫質上限、同時下載數、登入來源、瀏覽器路徑、
+錄製上限，以及**佇列全部完成時的提示音**（內建或自己選一個音檔）。設定存進
+`settings.json`，重開 app 還在。輸出資料夾與同時下載數改了要重新啟動才生效，其餘即時。
+需要登入才看得到的內容，就在設定裡把「登入狀態來源」選成你的瀏覽器——Haul 借用它
+已經有的登入狀態，不碰帳密。
 
 ## CLI
 
@@ -228,7 +231,7 @@ Haul 不會試著繞。
 
 ### 登入
 
-需要登入才看得到的內容，加 `--cookies <瀏覽器>`（GUI 是輸入欄旁的下拉選單）：
+需要登入才看得到的內容，加 `--cookies <瀏覽器>`（GUI 是設定面板的「登入狀態來源」）：
 
 ```bash
 haul --cookies chrome https://example.com/private/video
@@ -347,6 +350,7 @@ core/          haul-core：下載引擎。不知道 UI 的存在，透過 Sink �
   tools.rs       取得與更新 yt-dlp / ffmpeg
   verify.rs      驗證閘門
   log.rs         執行紀錄與輪替
+  settings.rs    使用者設定的讀寫（settings.json）
 cli/           haul：命令列外殼，把事件印成 NDJSON
 src-tauri/     haul-gui：圖形外殼，把事件轉成 Tauri event
 ui/index.html  前端（單檔，無建置步驟、無外部字體）
