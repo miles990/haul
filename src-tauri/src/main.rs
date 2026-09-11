@@ -124,6 +124,58 @@ fn clear_done(state: State<'_, Arc<Engine>>) -> Vec<Item> {
     state.clear_finished()
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    version: String,
+    body: Option<String>,
+}
+
+/// 問 GitHub Releases 有沒有新版。沒網路、dev 建置沒有 release 都會 Err，
+/// 啟動時的自動檢查把它吞掉，設定面板手動按的才顯示。
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let u = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(u.map(|u| UpdateInfo {
+        version: u.version.clone(),
+        body: u.body.clone(),
+    }))
+}
+
+/// 下載、覆蓋安裝、重新啟動。進度用 `update` 事件送回前端。
+/// 檢查與安裝都在這一端做，webview 不需要任何 updater 權限。
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let Some(u) = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Err("已是最新版".into());
+    };
+    let h = app.clone();
+    let mut got: u64 = 0;
+    u.download_and_install(
+        move |chunk, total| {
+            got += chunk as u64;
+            let _ = h.emit("update", serde_json::json!({ "bytes": got, "total": total }));
+        },
+        || {},
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    app.restart()
+}
+
 /// 讓 yt-dlp 自我更新。站點改版時靠這個跟上，不必等 Haul 重新發布。
 #[tauri::command]
 async fn update_tools(app: AppHandle) -> Result<String, String> {
@@ -292,6 +344,7 @@ async fn add_candidate(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -372,6 +425,8 @@ fn main() {
             thumb,
             clear_done,
             update_tools,
+            check_update,
+            install_update,
             retry_with_browser,
             add_candidate,
             record_item,

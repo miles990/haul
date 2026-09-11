@@ -11,6 +11,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 haul-core.workspace = true
 tauri = { version = "2", features = [] }
+# 從 GitHub Releases 自我更新。簽章是 minisign，跟 Apple／Windows 的程式碼簽章無關
+tauri-plugin-updater = "2"
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
