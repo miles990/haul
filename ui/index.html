@@ -207,18 +207,53 @@
     font-size: 12.5px;
   }
 
+  /* 同一張列表分兩組：進行中在上、已完成在下。不分頁，只是分組 */
+  .group {
+    margin: 10px 18px 3px;
+    font: 600 11px/1 var(--sans);
+    letter-spacing: 0.06em;
+    color: var(--dim);
+  }
+
   .track {
     flex: none; /* 佇列變長時不要被 flex 壓扁 */
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 48px 1fr auto;
     grid-template-rows: auto auto;
     gap: 3px 14px;
     padding: 9px 18px 10px;
     border-bottom: 1px solid #262c33;
   }
 
-  .name {
+  /* 縮圖：列表要認得出誰是誰。還沒有縮圖時顯示型別圖示 */
+  .thumb {
     grid-column: 1;
+    grid-row: 1 / span 2;
+    align-self: start;
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 3px;
+    background: var(--sunk);
+    color: var(--dim);
+    font-size: 17px;
+    overflow: hidden;
+  }
+  .thumb img { display: none; width: 100%; height: 100%; object-fit: cover; }
+  .thumb[data-kind="video"]::before { content: '▶'; }
+  .thumb[data-kind="audio"]::before { content: '♪'; }
+  .thumb[data-kind="image"]::before { content: '▣'; }
+  /* 放在型別圖示之後：同權重時後者勝，縮圖到手就不再畫圖示 */
+  .thumb.has::before { content: none; }
+  .thumb.has img { display: block; }
+
+  /* 原檔已不在：留著紀錄，但調暗、不再假裝點得開 */
+  .track[data-missing] { opacity: 0.5; cursor: default; }
+  .track[data-missing]:hover { background: none; }
+
+  .name {
+    grid-column: 2;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -226,7 +261,7 @@
   }
 
   .stat {
-    grid-column: 2;
+    grid-column: 3;
     grid-row: 1;
     align-self: center;
     font-size: 12px;
@@ -245,7 +280,7 @@
   /* 分段式電平表 —— 這支工具的招牌，用 repeating gradient 畫成 LED 階梯，
      純 CSS 沒有 per-frame 計算 */
   .meter {
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     grid-row: 2;
     height: 5px;
     background: var(--sunk);
@@ -271,7 +306,7 @@
   .track[data-status="resolving"] .meter { display: none; }
 
   .why {
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     grid-row: 3;
     font-size: 11.5px;
     color: var(--fail);
@@ -281,7 +316,7 @@
 
   /* 萃取失敗但瀏覽器可能救得了：給一顆安靜的行內按鈕，不彈視窗、不自動接手 */
   .act {
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     grid-row: 4;
     justify-self: start;
     margin-top: 4px;
@@ -299,7 +334,7 @@
 
   /* 瀏覽器偵測到的候選。自動挑的那個標出來，其餘可以另外抓 */
   .cands {
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     grid-row: 5;
     margin-top: 4px;
     font-size: 11.5px;
@@ -333,6 +368,22 @@
   .cand.on { color: var(--lamp); }
 
   .track[data-status="browser"] .meter > i { width: 100%; opacity: 0.25; }
+
+  /* 想搬、想刪、想改名：一步跳到真正的檔案管理器，Haul 自己不做這些 */
+  .show {
+    grid-column: 3;
+    grid-row: 2;
+    justify-self: end;
+    visibility: hidden;
+    padding: 2px 8px;
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--dim);
+    font: 11px/1.4 var(--sans);
+  }
+  .track[data-status="done"]:not([data-missing]):hover .show { visibility: visible; }
+  .show:hover { color: var(--ink); }
 
   /* ---------------------------------------------------------- 狀態列 */
 
@@ -457,11 +508,13 @@
 <section class="intake">
   <div class="field" id="field">
     <textarea id="input" spellcheck="false"
-      placeholder="貼上影片或音樂的連結，一行一個"></textarea>
+      placeholder="貼上影片、音樂或圖片的連結，一行一個"></textarea>
     <div class="row-actions">
       <div class="modes" role="radiogroup" aria-label="要下載什麼">
         <button type="button" class="mode on" data-mode="video" role="radio" aria-checked="true">影片</button>
         <button type="button" class="mode" data-mode="audio" role="radio" aria-checked="false">只要聲音</button>
+        <button type="button" class="mode" data-mode="image" role="radio" aria-checked="false"
+          title="影片連結抓封面圖；圖片網址直接抓；圖庫頁需要 gallery-dl">圖片</button>
       </div>
       <button class="primary" id="go">加入佇列</button>
     </div>
@@ -476,6 +529,10 @@
 
 <div id="queue">
   <p class="empty" id="empty">佇列是空的。貼上連結就會開始下載。</p>
+  <h2 class="group" id="active-h" hidden>進行中</h2>
+  <div id="active"></div>
+  <h2 class="group" id="done-h" hidden>已完成</h2>
+  <div id="done"></div>
 </div>
 
 <footer>
@@ -565,6 +622,11 @@
 
   const queue = document.getElementById('queue');
   const empty = document.getElementById('empty');
+  const activeBox = document.getElementById('active');
+  const doneBox   = document.getElementById('done');
+  const activeH   = document.getElementById('active-h');
+  const doneH     = document.getElementById('done-h');
+  const REVEAL_LABEL = /Win/.test(navigator.platform) ? '在檔案總管顯示' : '在 Finder 顯示';
   const input = document.getElementById('input');
   const field = document.getElementById('field');
   const go    = document.getElementById('go');
@@ -614,14 +676,19 @@
     const el = document.createElement('div');
     el.className = 'track';
     el.innerHTML =
+      '<span class="thumb"><img alt=""></span>' +
       '<span class="name"></span>' +
       '<span class="stat"></span>' +
       '<div class="meter"><i></i></div>' +
+      '<button type="button" class="show"></button>' +
       '<span class="why"></span>' +
       '<button type="button" class="act" hidden>用瀏覽器抓</button>' +
       '<button type="button" class="act act2" hidden></button>' +
       '<div class="cands" hidden></div>';
     const refs = {
+      thumb: el.querySelector('.thumb'),
+      img:   el.querySelector('.thumb img'),
+      show:  el.querySelector('.show'),
       name:  el.querySelector('.name'),
       stat:  el.querySelector('.stat'),
       fill:  el.querySelector('.meter > i'),
@@ -642,8 +709,42 @@
       refs.act2.disabled = true;
       invoke(cmd, { id: it.id }).catch(err => say(String(err), true));
     });
-    queue.appendChild(el);
+    refs.show.textContent = REVEAL_LABEL;
+    refs.show.addEventListener('click', ev => {
+      ev.stopPropagation();
+      if (el.dataset.path) invoke('reveal_file', { path: el.dataset.path }).catch(err => say(String(err), true));
+    });
     return { el, refs };
+  }
+
+  function updateHeads() {
+    activeH.hidden = activeBox.childElementCount === 0;
+    doneH.hidden = doneBox.childElementCount === 0;
+  }
+
+  /* 依狀態放到對的那一組：進行中依加入順序，已完成新的在上 */
+  function place(el, status) {
+    const box = status === 'done' ? doneBox : activeBox;
+    if (el.parentNode !== box) {
+      if (status === 'done') box.prepend(el); else box.appendChild(el);
+    }
+    updateHeads();
+  }
+
+  /* 每個項目只問一次縮圖。舊項目（更新前下載的）由後端從原檔補產 */
+  const thumbAsked = new Set();
+  function loadThumb(it, el, refs) {
+    if (thumbAsked.has(it.id)) return;
+    thumbAsked.add(it.id);
+    invoke('thumb', { id: it.id }).then(b64 => {
+      if (!b64) return;
+      refs.img.src = 'data:image/jpeg;base64,' + b64;
+      refs.thumb.classList.add('has');
+    }).catch(() => {
+      // 原檔已不在（或讀不到）：留著紀錄但不再假裝點得開
+      el.dataset.missing = '1';
+      el.title = '檔案已不在';
+    });
   }
 
   function paint(it) {
@@ -655,6 +756,9 @@
     const { el, refs } = row;
 
     el.dataset.status = it.status;
+    place(el, it.status);
+    refs.thumb.dataset.kind = it.kind;
+    if (it.status === 'done') loadThumb(it, el, refs);
     refs.name.textContent = it.title || it.input;
     refs.name.title = it.title || it.input;
     refs.stat.textContent = statLine(it);
@@ -666,7 +770,7 @@
     }
 
     if (it.path) el.dataset.path = it.path;
-    el.title = it.status === 'done' && it.path ? '點一下播放' : '';
+    if (!el.dataset.missing) el.title = it.status === 'done' && it.path ? '點一下播放' : '';
 
     refs.why.textContent = it.status === 'failed' ? (it.error || '') : '';
     refs.why.hidden = it.status !== 'failed';
@@ -720,9 +824,12 @@
 
   function reset(items) {
     rows.clear();
-    for (const el of [...queue.querySelectorAll('.track')]) el.remove();
+    thumbAsked.clear();
+    activeBox.replaceChildren();
+    doneBox.replaceChildren();
     items.forEach(paint);
     empty.hidden = items.length > 0;
+    updateHeads();
     updateTally();
   }
 
@@ -799,7 +906,7 @@
   // 完成的項目點一下就播放。用委派監聽，佇列再長也只有一個 listener。
   queue.addEventListener('click', e => {
     const row = e.target.closest('.track');
-    if (!row || row.dataset.status !== 'done' || !row.dataset.path) return;
+    if (!row || row.dataset.status !== 'done' || !row.dataset.path || row.dataset.missing) return;
     invoke('open_file', { path: row.dataset.path })
       .catch(err => say(String(err), true));
   });
