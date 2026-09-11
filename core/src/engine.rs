@@ -13,9 +13,9 @@ use crate::log::Logger;
 use crate::tools::{self, Tools};
 use crate::verify;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,7 +34,7 @@ pub struct Item {
     pub title: String,
     /// video | audio
     pub kind: String,
-    /// queued | resolving | browser | downloading | verifying | done | failed
+    /// queued | resolving | browser | recording | downloading | verifying | done | failed
     pub status: String,
     pub bytes: u64,
     pub total: u64,
@@ -50,6 +50,13 @@ pub struct Item {
     /// 「用瀏覽器抓」；401 / 429 / 驗證失敗不會設，開瀏覽器救不了那些。
     #[serde(default)]
     pub can_browser: bool,
+    /// 這個項目可以改用錄製（萃取失敗、或瀏覽器偵測不到可下載的媒體）
+    #[serde(default)]
+    pub can_record: bool,
+    /// 產出是原檔還是錄製（`recording`）。錄製「能不能播」跟「是不是原檔」是
+    /// 兩個問題：verified 講前者，這裡講後者。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -95,6 +102,8 @@ pub struct Config {
     pub browser_fallback: bool,
     /// 指定瀏覽器可執行檔；None 就自動找
     pub browser_path: Option<PathBuf>,
+    /// 錄製上限。忘了關不該錄到硬碟滿
+    pub record_max: Duration,
     pub max_downloads: usize,
     pub max_verifies: usize,
 }
@@ -110,6 +119,7 @@ impl Config {
             cookies_from: None,
             browser_fallback: false,
             browser_path: None,
+            record_max: Duration::from_secs(3 * 3600),
             max_downloads: 3,
             max_verifies: 2,
         }
@@ -129,6 +139,10 @@ enum Job {
         /// 圖庫會產出一整批檔案，各自收進自己的子資料夾，
         /// 否則一話漫畫就把下載資料夾洗爆
         subdir: Option<String>,
+    },
+    /// 錄製。不經 fetch —— 檔案是邊錄邊寫出來的，run_recording 直接接到驗證
+    Recording {
+        title: String,
     },
     /// 瀏覽器攔到的請求。清單交給 yt-dlp、單檔走直接抓取，都帶原始 header
     Browser {
@@ -184,6 +198,8 @@ pub struct Engine {
     browser: tokio::sync::Mutex<Option<BrowserSession>>,
     /// 還有幾個項目在用瀏覽器。歸零就關掉——不留一個 Chrome 在背景。
     browser_users: AtomicUsize,
+    /// 進行中的錄製，id → 停止訊號
+    recordings: Mutex<HashMap<u64, tokio::sync::watch::Sender<bool>>>,
     log: Logger,
     dl: Semaphore,
     vf: Semaphore,
@@ -235,6 +251,7 @@ impl Engine {
             login_opened: AtomicBool::new(false),
             browser: tokio::sync::Mutex::new(None),
             browser_users: AtomicUsize::new(0),
+            recordings: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(next),
         }))
     }
@@ -290,6 +307,8 @@ impl Engine {
             path: None,
             error: None,
             can_browser: false,
+            can_record: false,
+            source: None,
         };
         let id = item.id;
         self.items.lock().unwrap().push(item.clone());
@@ -323,12 +342,12 @@ impl Engine {
     }
 
     fn fail(&self, id: u64, why: impl Into<String>) {
-        self.fail_ex(id, why, false);
+        self.fail_ex(id, why, false, false);
     }
 
-    /// `can_browser` 要跟失敗一起送出，分兩次會讓 --json 的消費者看到
-    /// 兩個 failed 事件
-    fn fail_ex(&self, id: u64, why: impl Into<String>, can_browser: bool) {
+    /// `can_browser` / `can_record` 要跟失敗一起送出，分兩次會讓 --json 的
+    /// 消費者看到兩個 failed 事件
+    fn fail_ex(&self, id: u64, why: impl Into<String>, can_browser: bool, can_record: bool) {
         let why = why.into();
 
         // 需要登入的話開一次登入頁，而不是只丟一行錯誤讓使用者自己猜
@@ -353,6 +372,7 @@ impl Engine {
             i.status = "failed".into();
             i.error = Some(why);
             i.can_browser = can_browser;
+            i.can_record = can_record;
         });
     }
 
@@ -501,7 +521,8 @@ impl Engine {
             Err(e) => {
                 let msg = e.to_string();
                 let eligible = browser_eligible(&msg);
-                self.fail_ex(id, msg, eligible);
+                // 萃取失敗兩條路都開：瀏覽器可能攔得到，攔不到還能錄
+                self.fail_ex(id, msg, eligible, eligible);
                 if eligible && self.cfg.browser_fallback {
                     let me = self.clone();
                     return vec![tokio::spawn(async move {
@@ -532,6 +553,7 @@ impl Engine {
                     let key = match &job {
                         Job::Ytdlp { url } => url.clone(),
                         Job::Direct { media, .. } | Job::Browser { media, .. } => media.clone(),
+                        Job::Recording { title } => title.clone(),
                     };
                     if !self.seen.lock().unwrap().insert(key.clone()) {
                         continue;
@@ -568,6 +590,7 @@ impl Engine {
                     Some(Job::Direct { subdir: Some(_), .. }) => "gallery",
                     Some(Job::Direct { .. }) => "direct",
                     Some(Job::Browser { .. }) => "browser",
+                    Some(Job::Recording { .. }) => "recording",
                     None => "none",
                 },
                 "mode": mode.as_str(),
@@ -760,6 +783,23 @@ impl Engine {
             Err(e) => return self.fail(id, e.to_string()),
         };
 
+        self.finish_staged(&tools, id, &job, mode, staged, reported, forced_stem)
+            .await;
+    }
+
+    /// 一個已經在 staging 的檔案：驗證（限流）→ 過關才搬進正式資料夾。
+    /// run() 與錄製共用；錄製沒有下載階段所以直接從這裡進來。
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_staged(
+        &self,
+        tools: &Tools,
+        id: u64,
+        job: &Job,
+        mode: Mode,
+        staged: PathBuf,
+        reported: Option<f64>,
+        forced_stem: Option<String>,
+    ) {
         // 2. 驗證（限流）
         let _vp = match self.vf.acquire().await {
             Ok(p) => p,
@@ -767,7 +807,7 @@ impl Engine {
         };
         self.update(id, |i| i.status = "verifying".into());
 
-        let (secs, level) = match self.gate(&tools, &staged, &job, mode, reported).await {
+        let (secs, level) = match self.gate(tools, &staged, job, mode, reported).await {
             Ok(v) => v,
             Err(e) => {
                 let _ = tokio::fs::remove_file(&staged).await;
@@ -786,7 +826,7 @@ impl Engine {
             .extension()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "bin".into());
-        let dir = match &job {
+        let dir = match job {
             Job::Direct {
                 subdir: Some(sub), ..
             } => {
@@ -866,6 +906,8 @@ impl Engine {
                 .as_deref()
                 .and_then(verify::level_for_content_type)
                 .unwrap_or_else(|| verify::level_for(&ext)),
+            // 錄製出來的一定是媒體
+            Job::Recording { .. } => Level::Media,
             // 清單經 yt-dlp 合併出來一定是媒體；單檔看 Chrome 回報的 MIME
             Job::Browser { manifest: true, .. } => Level::Media,
             Job::Browser { content_type, .. } => content_type
@@ -997,6 +1039,9 @@ impl Engine {
                     Ok((raw, None, Some(title.clone())))
                 }
             }
+
+            // 錄製不經 fetch：run_recording 直接把檔案送進 finish_staged
+            Job::Recording { .. } => bail!("錄製不該走下載路徑"),
 
             Job::Browser {
                 media,
@@ -1130,8 +1175,9 @@ impl Engine {
         self.browser_release().await;
 
         let (job, title) = match outcome {
+            // 偵測不到可下載的媒體：瀏覽器這條走到底了，剩錄製
+            Err(e) => return self.fail_ex(id, e, false, true),
             Ok(v) => v,
-            Err(e) => return self.fail(id, e),
         };
         let tools = match self.tools().await {
             Ok(t) => t,
@@ -1232,6 +1278,136 @@ impl Engine {
             me.run(tools, id, job, mode, extract::Options::default())
                 .await
         }))
+    }
+}
+
+impl Engine {
+    /// 從 CLI 進來：新項目直接錄
+    pub async fn add_recording(self: &Arc<Self>, url: String, mode: Mode) -> (u64, JoinHandle<()>) {
+        let kind = if mode == Mode::Audio { "audio" } else { "video" };
+        let id = self.push(url.clone(), short(&url), kind);
+        let me = self.clone();
+        (
+            id,
+            tokio::spawn(async move { me.run_recording(id, url, mode).await }),
+        )
+    }
+
+    /// 從 GUI 進來：既有的失敗項目改用錄製
+    pub async fn record_item(self: &Arc<Self>, id: u64) {
+        let Some(item) = self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| i.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        self.run_recording(id, item.input, Mode::parse(&item.kind))
+            .await;
+    }
+
+    /// 回 false 表示這個項目沒在錄
+    pub fn stop_recording(&self, id: u64) -> bool {
+        match self.recordings.lock().unwrap().get(&id) {
+            Some(tx) => {
+                let _ = tx.send(true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    async fn run_recording(self: &Arc<Self>, id: u64, url: String, mode: Mode) {
+        let audio_only = mode == Mode::Audio;
+        self.update(id, |i| {
+            i.status = "recording".into();
+            i.error = None;
+            i.can_browser = false;
+            i.can_record = false;
+            i.source = Some("recording".into());
+            i.bytes = 0;
+            i.total = 0;
+            i.secs = None;
+        });
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        self.recordings.lock().unwrap().insert(id, tx);
+        self.browser_users.fetch_add(1, Ordering::SeqCst);
+
+        let webm = self.staging.join(format!("{id}-rec.webm"));
+        let outcome = async {
+            let cdp = self.browser_session().await?;
+            browser::record::record(
+                &cdp,
+                &url,
+                audio_only,
+                &webm,
+                self.cfg.record_max,
+                rx,
+                |bytes, secs| {
+                    self.update(id, |i| {
+                        i.bytes = bytes;
+                        i.secs = Some(secs as f64);
+                    });
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+        .await;
+
+        self.recordings.lock().unwrap().remove(&id);
+        self.browser_release().await;
+
+        let rec = match outcome {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&webm).await;
+                return self.fail(id, e);
+            }
+        };
+        self.log.info(
+            "record.stopped",
+            serde_json::json!({
+                "id": id,
+                "why": format!("{:?}", rec.stop),
+                "bytes": rec.bytes,
+                "secs": rec.secs,
+                "mime": rec.mime,
+            }),
+        );
+
+        let tools = match self.tools().await {
+            Ok(t) => t,
+            Err(e) => return self.fail(id, e),
+        };
+
+        // 轉封裝
+        let ext = browser::record::output_ext(audio_only);
+        let staged = self.staging.join(format!("{id}-rec.{ext}"));
+        self.update(id, |i| i.status = "verifying".into());
+        let remuxed =
+            browser::record::remux(&tools.ffmpeg, &webm, &staged, audio_only, &rec.mime).await;
+        let _ = tokio::fs::remove_file(&webm).await;
+        if let Err(e) = remuxed {
+            return self.fail(id, e.to_string());
+        }
+
+        // 驗證與存檔：跟其他 job 一樣的閘門與搬移
+        let title = if rec.title.trim().is_empty() {
+            short(&url)
+        } else {
+            rec.title.clone()
+        };
+        self.update(id, |i| i.title = title.clone());
+        let job = Job::Recording {
+            title: format!("{title}（錄製）"),
+        };
+        let stem = format!("{title}（錄製）");
+        self.finish_staged(&tools, id, &job, mode, staged, Some(rec.secs as f64), Some(stem))
+            .await;
     }
 }
 
