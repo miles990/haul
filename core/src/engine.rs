@@ -72,8 +72,9 @@ pub enum Event {
     SetupFailed {
         error: String,
     },
-    /// 任何狀態變化都送出完整項目，消費端不需要自己拼狀態
-    Item(Item),
+    /// 任何狀態變化都送出完整項目，消費端不需要自己拼狀態。
+    /// 裝箱是因為 Item 比其他變體大很多，不裝箱每個事件都搬一大塊
+    Item(Box<Item>),
     /// 瀏覽器偵測到的候選。`chosen` 是自動挑的那個，其餘讓使用者可以另外加
     Candidates {
         id: u64,
@@ -312,7 +313,7 @@ impl Engine {
         };
         let id = item.id;
         self.items.lock().unwrap().push(item.clone());
-        self.emit(Event::Item(item));
+        self.emit(Event::Item(Box::new(item)));
         id
     }
 
@@ -329,7 +330,7 @@ impl Engine {
             }
         };
         if let Some(item) = &patched {
-            self.emit(Event::Item(item.clone()));
+            self.emit(Event::Item(Box::new(item.clone())));
         }
         patched
     }
