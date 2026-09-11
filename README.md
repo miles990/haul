@@ -42,6 +42,7 @@ haul -q 1080 <網址>           # 畫質上限，避免一支 4K 就吃掉幾 GB
 haul -o <資料夾> <網址>       # 指定輸出位置
 haul --any <網址>             # 連網頁本身也存（預設拒絕，見下）
 haul --cookies chrome <網址>  # 需要登入的內容，借用瀏覽器已有的登入狀態
+haul --browser <網址>         # 前三層抓不到時，開 Chrome 把頁面跑起來攔截媒體請求
 haul status                   # 列出歷史
 haul logs                     # 看執行紀錄（診斷失敗用）
 haul update                   # 更新 yt-dlp
@@ -134,6 +135,7 @@ supported and will not be supported`），所以另有一層直接抓取的後�
 | yt-dlp | 約 1800 個影音站 | 必備，首次啟動自動下載 |
 | gallery-dl | 圖庫、漫畫、booru | **選配**，沒裝就在錯誤訊息裡說明怎麼裝 |
 | 直接抓取 | 裸媒體連結、Suno、一般檔案 | 內建 |
+| 瀏覽器 | 媒體網址只在跑起來的頁面裡才出現的站 | **選配**，需要 Chrome / Chromium / Edge / Brave，而且要使用者明確要求 |
 
 ### 圖庫（選配）
 
@@ -157,6 +159,41 @@ Python」——正好是自動下載想避開的坑。
 
 補齊剩下的很簡單：**重跑同一個網址即可**，已經下載好的會標成 `existing` 跳過，
 不會重複下載。真的想重抓就加 `--overwrite`。
+
+### 瀏覽器（選配）
+
+有些頁面的影片網址是 JS 在執行期才組出來的——`<video>` 標籤是空的、播放器
+按了才去要清單、或前面擋著一道 JS 挑戰。前三層都不執行 JS，所以看不到。
+第四層讓一個**真的 Chrome** 把頁面跑起來，攔截它發出的請求，把媒體的網址
+連同原始 header（Referer、Cookie、User-Agent）交回引擎，下載與驗證一個都不跳。
+
+```bash
+haul --browser https://example.com/player/123
+```
+
+GUI 上是萃取失敗的項目列出現「用瀏覽器抓」。兩邊語意一樣：**瀏覽器是使用者
+明確要求的後備，不是預設**——貼錯網址不該彈一個 Chrome 視窗出來。也只有萃取類的
+失敗才會提供；401 是身分問題、429 是限流、驗證失敗是內容問題，開瀏覽器救不了。
+
+Haul 啟動的是**獨立的 Chrome 實例**，profile 放在 app 資料夾的 `browser/`，
+跟你平常用的 Chrome 無關。原因是 Chrome 136 起禁止對預設 profile 開 remote
+debugging，接管使用者正在跑的 Chrome 已不可能。這個 profile 會保留，在裡面登入過
+的站下次直接有；這次帶了 `--cookies` 的話，導向前會先把匯出的 cookie 灌進去。
+
+偵測到的候選會自動挑一個：串流清單（m3u8 / mpd）優先——它包含所有畫質而且
+yt-dlp 會處理合併；否則單檔取最大的；小於 10 KB 的是探測不是內容。其餘候選在
+GUI 上列出來，「抓這個」會新增一個項目去抓它。`--json` 會先印一行
+`{"event":"candidates", …}` 讓 agent 看得到全部。
+
+停止觀察的規則：第一個清單出現後再等 3 秒收尾；單檔候選 5 秒內沒有新的就停；
+整體 60 秒。頁面要按播放才會載入的，就在視窗裡按。
+
+看到分段（`.ts` / `.m4s`）卻沒有清單，代表清單是 JS 自己組的，這種抓不到原檔；
+錯誤訊息會明講，那是錄製的範圍。
+
+DevTools 只綁 127.0.0.1、port 由 Chrome 隨機挑、工作結束就關掉。session 期間
+本機其他程序理論上連得進這個瀏覽器；接受這個代價是因為 Rust 在 Windows 上沒辦法
+乾淨地用 pipe 取代 port。
 
 ### 登入
 
@@ -257,6 +294,8 @@ git tag v0.1.0 && git push origin v0.1.0
 ## 限制
 
 - 走 DRM（Widevine EME）保護的串流服務不處理，也不打算處理
+- 分段串流沒有清單（JS 自己組 segment 的 MSE）抓不到原檔；WebRTC 通話根本沒有檔案。
+  這兩種只能錄製（規劃中）
 - 需要登入的內容要靠 `--cookies` 借用瀏覽器的登入狀態；沒開過該瀏覽器、或瀏覽器
   沒登入過該站，一樣抓不到
 - 首次啟動需要網路取得 yt-dlp 與 ffmpeg
@@ -269,6 +308,10 @@ core/          haul-core：下載引擎。不知道 UI 的存在，透過 Sink �
   extract.rs     驅動 yt-dlp
   direct.rs      yt-dlp 拒絕時的後備（裸媒體連結、Suno）
   cookies.rs     借用瀏覽器登入狀態：由 yt-dlp 匯出，分給另外兩條路徑
+  browser/       第四條路徑：Haul 自己的 Chrome
+    chrome.rs      找可執行檔、啟動、讀 DevToolsActivePort
+    cdp.rs         最小 CDP 客戶端（JSON over WebSocket）
+    sniff.rs       從網路事件挑媒體候選、計分、停止規則
   tools.rs       取得與更新 yt-dlp / ffmpeg
   verify.rs      驗證閘門
   log.rs         執行紀錄與輪替
