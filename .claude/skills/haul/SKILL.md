@@ -39,6 +39,7 @@ haul -c 5 <網址>...                 # 同時下載 5 個（預設 3）
 haul --any <網址>                   # 連網頁本身也存（預設拒絕）
 haul --cookies chrome <網址>        # 需要登入的內容，借用瀏覽器已有的登入狀態
 haul --browser <網址>               # 前三層抓不到時開 Chrome 把頁面跑起來攔截媒體請求
+haul record <網址>                  # 錄製分頁的畫面＋聲音（連檔案都沒有時；-a 只錄聲音）
 haul status                         # 列出歷史
 haul logs                           # 看執行紀錄（診斷失敗用）
 haul update                         # 更新 yt-dlp
@@ -91,7 +92,7 @@ haul logs -n 30                                    # 人看的版本
 
 1. **錯誤訊息提到 extractor、格式解析、`Unable to extract`** → 站點改版了。跑 `haul update` 讓 yt-dlp 自我更新，然後重試一次。這是最常見的失敗原因。
 
-   更新後還是 `Unsupported URL` / `不像檔案` → 這頁的媒體網址是 JS 執行期才出現的。加 `--browser` 重試：haul 會開一個 Chrome 視窗把頁面跑起來、攔截媒體請求、自動挑一個抓。**頁面要按播放才載入的，請使用者在那個視窗裡按**。`--json` 會多一行 `{"event":"candidates",…}` 列出全部候選。看到「分段串流但沒有清單」就是抓不到原檔，據實回報（錄製功能規劃中）。沒有 Chrome 的機器會明講要裝什麼。
+   更新後還是 `Unsupported URL` / `不像檔案` → 這頁的媒體網址是 JS 執行期才出現的。加 `--browser` 重試：haul 會開一個 Chrome 視窗把頁面跑起來、攔截媒體請求、自動挑一個抓。**頁面要按播放才載入的，請使用者在那個視窗裡按**。`--json` 會多一行 `{"event":"candidates",…}` 列出全部候選。看到「分段串流但沒有清單」就代表沒有檔案可抓，改用 `haul record <網址>`：告訴使用者這會開一個 Chrome 視窗、**要在裡面把內容播出來**、錄製是即時的（3 分鐘的片要錄 3 分鐘），CLI 按 Ctrl-C 停。沒有 Chrome 的機器會明講要裝什麼。
 
 2. **`[Liability] This website is not supported`** → yt-dlp 對該站是政策性拒絕。haul 有後備路徑（直接抓取，涵蓋 suno.com 與裸媒體連結）；如果後備也沒有對應規則，這個站就是抓不到，據實回報即可。
 
@@ -115,7 +116,11 @@ haul logs -n 30                                    # 人看的版本
 
 - **DRM 保護的串流**（Netflix、Spotify、Apple Music 這類走 Widevine 的）完全不處理
 - **帳號密碼**：haul 只讀瀏覽器已有的 cookie，不做登入。需要登入就請使用者在瀏覽器登入
-- 不要嘗試繞過上面兩項
+- **DRM 內容錄出來是黑畫面**（Chrome 保護管線不給擷取），不要嘗試繞
+- 錄製通話或會議前，提醒使用者要先取得參與者同意
+- 不要嘗試繞過上面幾項
+
+`haul record` 的完成項目帶 `source: "recording"`，`verified` 仍是 `media`——「能不能播」與「是不是原檔」分開看。
 
 ## 沒安裝的話
 

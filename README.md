@@ -43,6 +43,7 @@ haul -o <資料夾> <網址>       # 指定輸出位置
 haul --any <網址>             # 連網頁本身也存（預設拒絕，見下）
 haul --cookies chrome <網址>  # 需要登入的內容，借用瀏覽器已有的登入狀態
 haul --browser <網址>         # 前三層抓不到時，開 Chrome 把頁面跑起來攔截媒體請求
+haul record <網址>            # 錄製分頁的畫面＋聲音（連檔案都沒有時用；-a 只錄聲音）
 haul status                   # 列出歷史
 haul logs                     # 看執行紀錄（診斷失敗用）
 haul update                   # 更新 yt-dlp
@@ -195,6 +196,36 @@ DevTools 只綁 127.0.0.1、port 由 Chrome 隨機挑、工作結束就關掉。
 本機其他程序理論上連得進這個瀏覽器；接受這個代價是因為 Rust 在 Windows 上沒辦法
 乾淨地用 pipe 取代 port。
 
+### 錄製
+
+有些內容根本不是檔案：JS 自己組 segment 的串流、WebRTC 通話、DRM 播放器。
+沒有網址可抓，只能**錄**。`haul record` 用 Haul 的 Chrome 把頁面跑起來，
+錄下那個分頁的畫面與聲音：
+
+```bash
+haul record https://example.com/live/room     # 畫面＋聲音
+haul record -a https://example.com/live/room   # 只要聲音
+haul record --max 30m <網址>                    # 上限（預設 3h）
+```
+
+分頁自己擷取自己（`getDisplayMedia({preferCurrentTab})`，Chrome 帶
+`--auto-accept-this-tab-capture` 所以不跳選擇框），**只錄那一個分頁的聲音**，
+不會混到系統通知或你另一邊放的音樂，也不需要 macOS 的螢幕錄影權限或虛擬音訊裝置。
+Chrome 自己的「此分頁正在分享」藍條會出現——那是誠實的訊號，按它也能停。
+
+**要錄的內容得在那個瀏覽器視窗裡播放**。錄製是即時的：3 分鐘的片要錄 3 分鐘。
+停止有三種，先到先贏：按 Ctrl-C（CLI）或停止鈕（GUI）；頁面上的媒體全部播完且
+5 秒內沒有新的開始；到達上限。停止後 ffmpeg 轉封裝——影片出 **mp4**（h264 直接
+copy、其餘重編）、只要聲音出 **m4a**，因為 macOS 的系統播放器不吃 WebM。
+
+錄出來的檔案照樣過**完整的 `media` 驗證閘門**（解碼 + 無聲偵測），錄到一片靜音會被
+抓出來。歷史與 `--json` 上這種項目帶 `source: "recording"`，檔名加「（錄製）」——
+「能不能播」與「是不是原檔」是兩個問題，分開講。`verified` 仍誠實報 `media`。
+
+限制：跨網域 iframe 裡的播放器 Haul 看不到，那種「播完自動停」失效，只能手動停或等
+上限。**DRM 內容錄出來是黑畫面**（Chrome 的保護管線不給擷取），這是預期行為，
+Haul 不會試著繞。
+
 ### 登入
 
 需要登入才看得到的內容，加 `--cookies <瀏覽器>`（GUI 是輸入欄旁的下拉選單）：
@@ -295,7 +326,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 - 走 DRM（Widevine EME）保護的串流服務不處理，也不打算處理
 - 分段串流沒有清單（JS 自己組 segment 的 MSE）抓不到原檔；WebRTC 通話根本沒有檔案。
-  這兩種只能錄製（規劃中）
+  這兩種下不了，只能用 `haul record` 錄畫面與聲音（見下）
 - 需要登入的內容要靠 `--cookies` 借用瀏覽器的登入狀態；沒開過該瀏覽器、或瀏覽器
   沒登入過該站，一樣抓不到
 - 首次啟動需要網路取得 yt-dlp 與 ffmpeg
@@ -312,6 +343,7 @@ core/          haul-core：下載引擎。不知道 UI 的存在，透過 Sink �
     chrome.rs      找可執行檔、啟動、讀 DevToolsActivePort
     cdp.rs         最小 CDP 客戶端（JSON over WebSocket）
     sniff.rs       從網路事件挑媒體候選、計分、停止規則
+    record.rs      錄製：分頁擷取、停止條件、轉封裝成 mp4 / m4a
   tools.rs       取得與更新 yt-dlp / ffmpeg
   verify.rs      驗證閘門
   log.rs         執行紀錄與輪替
