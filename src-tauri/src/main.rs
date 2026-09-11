@@ -6,11 +6,13 @@
 //! 推給 webview，以及把 webview 的指令轉成引擎呼叫。CLI 是同一個引擎的
 //! 另一個外殼，兩邊行為不會分岔。
 
+use haul_core::settings::Settings;
 use haul_core::{
     default_bin_dir, default_out_dir, open_with_system, validate_playable, Config, Engine, Event,
     Item, Mode, Options,
 };
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -117,6 +119,92 @@ fn retry_with_browser(app: AppHandle, id: u64) {
     tauri::async_runtime::spawn(async move { eng.retry_with_browser(id).await });
 }
 
+/// 讀目前設定（給面板初始化）
+#[tauri::command]
+fn get_settings(path: State<'_, PathBuf>) -> Settings {
+    Settings::load(&path)
+}
+
+/// 存設定並套用能即時套用的部分。輸出資料夾與同時下載數要重新啟動才生效。
+#[tauri::command]
+fn save_settings(app: AppHandle, path: State<'_, PathBuf>, settings: Settings) -> Result<(), String> {
+    settings.save(&path).map_err(|e| e.to_string())?;
+    let eng = engine(&app);
+    eng.set_cookies_from(settings.cookies_from.clone());
+    eng.set_record_max(settings.record_max_secs);
+    eng.set_browser_path(settings.browser_path.clone());
+    Ok(())
+}
+
+/// 讓使用者用原生對話框挑一個音檔，回傳路徑（取消回 None）。
+/// 走系統的選擇器而不是引入 dialog plugin，延續 open / xdg-open 的作法。
+#[tauri::command]
+fn pick_audio_file() -> Option<String> {
+    native_pick_audio()
+}
+
+/// 驗證一個音檔真的能解碼（選到壞檔當場知道，不必等佇列跑完）
+#[tauri::command]
+async fn verify_audio(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err("找不到這個檔案".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || haul_core::verify::verify(&p))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|_| ())
+        .map_err(|e| format!("這個檔案不能當提示音：{e}"))
+}
+
+/// 讀音檔的位元組回前端播放（base64）。不開 asset protocol 白名單。
+#[tauri::command]
+fn read_audio(path: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    // 提示音應該很小；設個上限免得有人選了一部電影
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("音檔太大（上限 8 MB）".into());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[cfg(target_os = "macos")]
+fn native_pick_audio() -> Option<String> {
+    // AppleScript 的 choose file，限音訊類型
+    let script = r#"try
+        set f to choose file with prompt "選一個提示音" of type {"mp3","m4a","wav","aiff","aac","ogg"}
+        POSIX path of f
+    on error
+        return ""
+    end try"#;
+    let out = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+#[cfg(target_os = "windows")]
+fn native_pick_audio() -> Option<String> {
+    let ps = r#"Add-Type -AssemblyName System.Windows.Forms
+$d = New-Object System.Windows.Forms.OpenFileDialog
+$d.Filter = 'Audio|*.mp3;*.m4a;*.wav;*.aac;*.ogg'
+if ($d.ShowDialog() -eq 'OK') { Write-Output $d.FileName }"#;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn native_pick_audio() -> Option<String> {
+    None // Linux 桌面環境太雜，先讓使用者自己貼路徑
+}
+
 /// 萃取失敗或偵測不到媒體時，改用錄製。錄製很久，不等它，狀態走事件回來。
 #[tauri::command]
 fn record_item(app: AppHandle, id: u64) {
@@ -197,8 +285,17 @@ fn main() {
                 }
             });
 
-            let eng = Engine::new(Config::new(default_out_dir(), default_bin_dir()), sink)?;
+            // app 資料夾（跟 bin/ 平行）放 settings.json
+            let app_dir = default_bin_dir()
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(default_bin_dir);
+            let settings_path = Settings::path_in(&app_dir);
+            let settings = Settings::load(&settings_path);
+            let cfg = Config::from_settings(&settings, default_out_dir(), default_bin_dir());
+            let eng = Engine::new(cfg, sink)?;
             app.manage(eng.clone());
+            app.manage(settings_path);
 
             // 先把工具備好，使用者貼連結時就不用等
             tauri::async_runtime::spawn(async move {
@@ -218,7 +315,12 @@ fn main() {
             retry_with_browser,
             add_candidate,
             record_item,
-            stop_recording
+            stop_recording,
+            get_settings,
+            save_settings,
+            pick_audio_file,
+            verify_audio,
+            read_audio
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 啟動失敗");
