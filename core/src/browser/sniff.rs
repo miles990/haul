@@ -4,7 +4,13 @@
 //! 同一支片的兩三種畫質。這裡負責分類、去重、挑一個最像的，
 //! 以及決定什麼時候可以停止觀察。
 
+use super::cdp::{Cdp, CdpEvent};
+use crate::cookies::Cookie;
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +215,217 @@ impl StopRule {
     }
 }
 
+pub struct Sniffed {
+    pub candidates: Candidates,
+    pub title: String,
+}
+
+/// 開一個分頁載入 `url`，觀察網路直到停止規則到了。
+///
+/// `cookies` 非空時在導向前灌進去——瀏覽器 profile 是乾淨的，
+/// 使用者這次帶的登入狀態要自己送進去。`progress` 收到目前的候選數，給 UI 顯示。
+pub async fn sniff(
+    cdp: &Arc<Cdp>,
+    url: &str,
+    cookies: &[Cookie],
+    mut progress: impl FnMut(usize),
+) -> Result<Sniffed> {
+    // 先訂閱再開分頁，否則載入初期的事件會漏掉
+    let mut events = cdp.subscribe();
+
+    let target = cdp
+        .call(None, "Target.createTarget", json!({ "url": "about:blank" }))
+        .await?;
+    let target_id = target["targetId"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Target.createTarget 沒有回 targetId"))?
+        .to_string();
+    let attached = cdp
+        .call(
+            None,
+            "Target.attachToTarget",
+            json!({ "targetId": target_id, "flatten": true }),
+        )
+        .await?;
+    let sid = attached["sessionId"]
+        .as_str()
+        .ok_or_else(|| anyhow!("attachToTarget 沒有回 sessionId"))?
+        .to_string();
+
+    cdp.call(Some(&sid), "Network.enable", json!({})).await?;
+    cdp.call(Some(&sid), "Page.enable", json!({})).await?;
+
+    if !cookies.is_empty() {
+        let list: Vec<Value> = cookies
+            .iter()
+            .map(|c| {
+                let mut v = json!({
+                    "name": c.name, "value": c.value, "domain": c.domain,
+                    "path": c.path, "secure": c.secure, "httpOnly": c.http_only,
+                });
+                if let Some(e) = c.expires {
+                    v["expires"] = json!(e);
+                }
+                v
+            })
+            .collect();
+        // 一顆壞 cookie 不該讓整批失敗，所以錯誤只記不擋
+        let _ = cdp
+            .call(Some(&sid), "Network.setCookies", json!({ "cookies": list }))
+            .await;
+    }
+
+    cdp.call(Some(&sid), "Page.navigate", json!({ "url": url }))
+        .await?;
+
+    let mut rule = StopRule::new(Instant::now());
+    let mut found = Candidates::default();
+    // requestId -> 該請求的 header；ExtraInfo 與 requestWillBeSent 順序不定，兩邊都收
+    let mut req_headers: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut req_type: HashMap<String, String> = HashMap::new();
+
+    loop {
+        let left = rule.deadline().saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let ev = match tokio::time::timeout(left, events.recv()).await {
+            Ok(Ok(ev)) => ev,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(_)) => bail!("瀏覽器連線已關閉"),
+            Err(_) => break, // 到期
+        };
+        if ev.session_id.as_deref() != Some(sid.as_str()) {
+            // 分頁被使用者關掉：Target.targetDestroyed 是瀏覽器層級事件，沒有 sessionId
+            if ev.method == "Target.targetDestroyed"
+                && ev.params["targetId"].as_str() == Some(target_id.as_str())
+            {
+                bail!("已取消（分頁被關閉）");
+            }
+            continue;
+        }
+        if let Some(c) = on_event(&ev, &mut req_headers, &mut req_type) {
+            rule.saw(c.kind, Instant::now());
+            found.push(c);
+            progress(found.list().len());
+        }
+    }
+
+    let title = cdp
+        .call(
+            Some(&sid),
+            "Runtime.evaluate",
+            json!({ "expression": "document.title", "returnByValue": true }),
+        )
+        .await
+        .ok()
+        .and_then(|v| v["result"]["value"].as_str().map(str::to_string))
+        .unwrap_or_default();
+
+    let _ = cdp
+        .call(None, "Target.closeTarget", json!({ "targetId": target_id }))
+        .await;
+
+    Ok(Sniffed {
+        candidates: found,
+        title,
+    })
+}
+
+fn headers_of(v: &Value) -> Vec<(String, String)> {
+    v.as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn header<'a>(hs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    hs.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+/// 把一個 Network 事件變成候選（如果它是媒體的話）。
+fn on_event(
+    ev: &CdpEvent,
+    req_headers: &mut HashMap<String, Vec<(String, String)>>,
+    req_type: &mut HashMap<String, String>,
+) -> Option<Candidate> {
+    let p = &ev.params;
+    let rid = p["requestId"].as_str()?.to_string();
+    match ev.method.as_str() {
+        "Network.requestWillBeSent" => {
+            req_headers
+                .entry(rid.clone())
+                .or_default()
+                .extend(headers_of(&p["request"]["headers"]));
+            if let Some(t) = p["type"].as_str() {
+                req_type.insert(rid, t.to_string());
+            }
+            None
+        }
+        // 這個事件才有完整的 header，包括瀏覽器自己加的 Cookie
+        "Network.requestWillBeSentExtraInfo" => {
+            let mut hs = headers_of(&p["headers"]);
+            let entry = req_headers.entry(rid).or_default();
+            // ExtraInfo 的比較完整，蓋掉同名的
+            entry.retain(|(k, _)| !hs.iter().any(|(k2, _)| k2.eq_ignore_ascii_case(k)));
+            entry.append(&mut hs);
+            None
+        }
+        "Network.responseReceived" => {
+            let r = &p["response"];
+            let status = r["status"].as_u64().unwrap_or(0);
+            if status != 200 && status != 206 {
+                return None;
+            }
+            let url = r["url"].as_str()?.to_string();
+            let host = url
+                .split("://")
+                .nth(1)?
+                .split('/')
+                .next()?
+                .split(':')
+                .next()?;
+            if is_ad_host(host) {
+                return None;
+            }
+            let mime = r["mimeType"].as_str().unwrap_or("").to_string();
+            let rtype = p["type"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| req_type.get(&rid).cloned())
+                .unwrap_or_default();
+            let kind = classify(&url, &mime, &rtype)?;
+
+            let resp_headers = headers_of(&r["headers"]);
+            // 206 的 Content-Length 是那一段的長度，總長在 Content-Range 的斜線後面
+            let size = header(&resp_headers, "content-range")
+                .and_then(|cr| cr.rsplit('/').next())
+                .and_then(|t| t.parse::<u64>().ok())
+                .or_else(|| header(&resp_headers, "content-length").and_then(|l| l.parse().ok()));
+
+            let headers = keep_headers(
+                req_headers
+                    .get(&rid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            );
+            Some(Candidate {
+                url,
+                kind,
+                size,
+                mime,
+                headers,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +570,69 @@ mod tests {
         let mut r = StopRule::new(t0);
         r.saw(Kind::Segment, t0 + Duration::from_secs(3));
         assert_eq!(r.deadline(), t0 + StopRule::OVERALL);
+    }
+
+    /// 起一個只回兩個路徑的本機 HTTP server：一頁有 <video>，一支假的 mp4。
+    /// 用 std 的 TcpListener 就夠，不需要引入 hyper。
+    fn tiny_server() -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let page = format!(
+            "<!doctype html><title>Tiny Player</title><video autoplay muted src=\"{base}/clip.mp4\"></video>"
+        );
+        // 假 mp4：內容不重要，這裡測的是偵測不是驗證；夠大才不會被當 beacon
+        let clip = vec![0u8; 64 * 1024];
+        let h = std::thread::spawn(move || {
+            for _ in 0..16 {
+                let Ok((mut s, _)) = l.accept() else { break };
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let (ct, body): (&str, &[u8]) = if req.starts_with("GET /clip.mp4") {
+                    ("video/mp4", &clip)
+                } else {
+                    ("text/html", page.as_bytes())
+                };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(body);
+            }
+        });
+        (base, h)
+    }
+
+    #[tokio::test]
+    async fn real_chrome_reports_the_video_on_the_page() {
+        if std::env::var("HAUL_TEST_CHROME").is_err() {
+            eprintln!("略過：未設 HAUL_TEST_CHROME");
+            return;
+        }
+        let (base, _srv) = tiny_server();
+        let exe = super::super::chrome::find(None).unwrap();
+        let dir = std::env::temp_dir().join("haul-chrome-test");
+        let chrome = super::super::chrome::launch(&exe, &dir).await.unwrap();
+        let cdp = super::super::cdp::Cdp::connect(&chrome.ws_url).await.unwrap();
+
+        let mut seen = 0;
+        let out = sniff(&cdp, &format!("{base}/"), &[], |n| seen = n)
+            .await
+            .unwrap();
+        let _ = cdp.call(None, "Browser.close", json!({})).await;
+
+        let best = out.candidates.best().expect("該偵測到 clip.mp4");
+        assert!(best.url.ends_with("/clip.mp4"), "{}", best.url);
+        assert_eq!(best.kind, Kind::File);
+        assert_eq!(best.size, Some(64 * 1024));
+        assert!(
+            best.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("referer")),
+            "{:?}",
+            best.headers
+        );
+        assert_eq!(out.title, "Tiny Player");
+        assert!(seen >= 1);
     }
 }
