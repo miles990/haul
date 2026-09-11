@@ -194,6 +194,27 @@ enum Resolution {
 /// 歷史最多保留幾筆，避免無限成長
 const HISTORY_CAP: usize = 500;
 
+/// 佔用瀏覽器的憑證。Drop 時歸還——任務被取消（abort）時也會走到這裡，
+/// 不會把 Chrome 留在背景。歸還是 async 的（要透過 CDP 關瀏覽器），
+/// Drop 裡不能 await，所以 spawn 出去。
+struct BrowserLease(Arc<Engine>);
+
+impl BrowserLease {
+    fn take(eng: &Arc<Engine>) -> Self {
+        eng.browser_users.fetch_add(1, Ordering::SeqCst);
+        Self(eng.clone())
+    }
+}
+
+impl Drop for BrowserLease {
+    fn drop(&mut self) {
+        let eng = self.0.clone();
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move { eng.browser_release().await });
+        }
+    }
+}
+
 pub struct Engine {
     cfg: Config,
     staging: PathBuf,
@@ -220,6 +241,8 @@ pub struct Engine {
     browser_users: AtomicUsize,
     /// 進行中的錄製，id → 停止訊號
     recordings: Mutex<HashMap<u64, tokio::sync::watch::Sender<bool>>>,
+    /// 進行中的項目任務，id → abort 把手。使用者移除還沒完成的項目時用它取消。
+    tasks: Mutex<HashMap<u64, tokio::task::AbortHandle>>,
     /// 執行期可改的錄製上限與瀏覽器路徑（同 cookies_from 的作法）。
     /// 在錄製／開瀏覽器時才讀，不碰 staging，所以能安全即時換。
     record_max: Mutex<Duration>,
@@ -278,6 +301,7 @@ impl Engine {
             browser: tokio::sync::Mutex::new(None),
             browser_users: AtomicUsize::new(0),
             recordings: Mutex::new(HashMap::new()),
+            tasks: Mutex::new(HashMap::new()),
             record_max: Mutex::new(cfg_record_max),
             browser_path: Mutex::new(cfg_browser_path),
             next_id: AtomicU64::new(next),
@@ -357,11 +381,70 @@ impl Engine {
         Ok(got)
     }
 
-    /// 移除已完成與失敗的項目，回傳剩下的
+    /// 移除已完成與失敗的項目，回傳剩下的。跟單筆移除一樣寫 tombstone，
+    /// 否則重開 app 它們又回來。
     pub fn clear_finished(&self) -> Vec<Item> {
-        let mut g = self.items.lock().unwrap();
-        g.retain(|i| i.status != "done" && i.status != "failed");
-        g.clone()
+        let gone: Vec<Item> = {
+            let mut g = self.items.lock().unwrap();
+            let (gone, keep): (Vec<Item>, Vec<Item>) = g
+                .drain(..)
+                .partition(|i| i.status == "done" || i.status == "failed");
+            *g = keep;
+            gone
+        };
+        for it in &gone {
+            self.record_removed(it);
+        }
+        self.snapshot()
+    }
+
+    /// 把一個項目從列表拿掉。只動列表不動檔案——檔案交給 Finder。
+    /// 還沒完成的會先取消：任務 abort、子程序跟著 kill_on_drop 收掉。
+    pub fn remove(&self, id: u64) -> Result<(), String> {
+        let item = {
+            let mut g = self.items.lock().unwrap();
+            let at = g.iter().position(|i| i.id == id).ok_or("沒有這個項目")?;
+            g.remove(at)
+        };
+        let terminal = item.status == "done" || item.status == "failed";
+        if !terminal {
+            if let Some(h) = self.tasks.lock().unwrap().remove(&id) {
+                h.abort();
+            }
+            // 錄製中的順便送停止訊號；Chrome 會在租約歸還時關閉
+            self.recordings.lock().unwrap().remove(&id);
+            self.log.info("item.cancelled", serde_json::json!({ "id": id }));
+        } else {
+            // 終局狀態的才在歷史裡，才需要 tombstone
+            self.record_removed(&item);
+        }
+        let mut gone = item;
+        gone.status = "removed".into();
+        self.emit(Event::Item(Box::new(gone)));
+        Ok(())
+    }
+
+    /// 歷史是 append-only 的，移除靠追加一行 status = removed 的 tombstone，
+    /// load_history 讀到就把同 id 的略過。
+    fn record_removed(&self, item: &Item) {
+        let mut t = item.clone();
+        t.status = "removed".into();
+        self.record(&t);
+    }
+
+    /// spawn 一個項目的任務並記下 abort 把手；跑完自己註銷。
+    fn spawn_tracked(
+        self: &Arc<Self>,
+        id: u64,
+        fut: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> JoinHandle<()> {
+        let me = self.clone();
+        let h = tokio::spawn(async move {
+            fut.await;
+            me.tasks.lock().unwrap().remove(&id);
+        });
+        self.tasks.lock().unwrap().insert(id, h.abort_handle());
+        h
     }
 
     fn emit(&self, e: Event) {
@@ -614,7 +697,7 @@ impl Engine {
                 self.fail_ex(id, msg, eligible, eligible);
                 if eligible && self.cfg.browser_fallback {
                     let me = self.clone();
-                    return vec![tokio::spawn(async move {
+                    return vec![self.spawn_tracked(id, async move {
                         me.retry_with_browser(id).await
                     })];
                 }
@@ -691,7 +774,9 @@ impl Engine {
                 let me = self.clone();
                 let tools = tools.clone();
                 let opts = opts.clone();
-                tokio::spawn(async move { me.run(tools, item_id, job, mode, opts).await })
+                self.spawn_tracked(item_id, async move {
+                    me.run(tools, item_id, job, mode, opts).await
+                })
             })
             .collect()
     }
@@ -1265,6 +1350,12 @@ impl Engine {
         Ok(cdp)
     }
 
+    /// GUI 用：在背景用瀏覽器重試，任務可被移除取消
+    pub fn start_retry_with_browser(self: &Arc<Self>, id: u64) {
+        let me = self.clone();
+        self.spawn_tracked(id, async move { me.retry_with_browser(id).await });
+    }
+
     async fn browser_release(&self) {
         if self.browser_users.fetch_sub(1, Ordering::SeqCst) == 1 {
             if let Some(s) = self.browser.lock().await.take() {
@@ -1297,10 +1388,9 @@ impl Engine {
             i.can_browser = false;
             i.total = 0;
         });
-        self.browser_users.fetch_add(1, Ordering::SeqCst);
-
+        let lease = BrowserLease::take(self);
         let outcome = self.sniff_for(id, &item.input).await;
-        self.browser_release().await;
+        drop(lease);
 
         let (job, title) = match outcome {
             // 偵測不到可下載的媒體：瀏覽器這條走到底了，剩錄製
@@ -1402,7 +1492,7 @@ impl Engine {
         };
         let tools = self.tools().await.ok()?;
         let me = self.clone();
-        Some(tokio::spawn(async move {
+        Some(self.spawn_tracked(id, async move {
             me.run(tools, id, job, mode, extract::Options::default())
                 .await
         }))
@@ -1417,8 +1507,14 @@ impl Engine {
         let me = self.clone();
         (
             id,
-            tokio::spawn(async move { me.run_recording(id, url, mode).await }),
+            self.spawn_tracked(id, async move { me.run_recording(id, url, mode).await }),
         )
+    }
+
+    /// GUI 用：在背景改用錄製，任務可被移除取消
+    pub fn start_record_item(self: &Arc<Self>, id: u64) {
+        let me = self.clone();
+        self.spawn_tracked(id, async move { me.record_item(id).await });
     }
 
     /// 從 GUI 進來：既有的失敗項目改用錄製
@@ -1462,7 +1558,7 @@ impl Engine {
         });
         let (tx, rx) = tokio::sync::watch::channel(false);
         self.recordings.lock().unwrap().insert(id, tx);
-        self.browser_users.fetch_add(1, Ordering::SeqCst);
+        let lease = BrowserLease::take(self);
 
         let webm = self.staging.join(format!("{id}-rec.webm"));
         let outcome = async {
@@ -1487,7 +1583,7 @@ impl Engine {
         .await;
 
         self.recordings.lock().unwrap().remove(&id);
-        self.browser_release().await;
+        drop(lease);
 
         let rec = match outcome {
             Ok(r) => r,
@@ -1565,10 +1661,20 @@ pub fn load_history(path: &Path, cap: usize) -> Vec<Item> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let mut items: Vec<Item> = text
+    let all: Vec<Item> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<Item>(l).ok())
+        .collect();
+    // 使用者移除過的：tombstone 是同 id、status = removed 的一行
+    let removed: HashSet<u64> = all
+        .iter()
+        .filter(|i| i.status == "removed")
+        .map(|i| i.id)
+        .collect();
+    let mut items: Vec<Item> = all
+        .into_iter()
+        .filter(|i| i.status != "removed" && !removed.contains(&i.id))
         .filter(|i| match &i.path {
             Some(p) => Path::new(p).is_file(),
             // 失敗的項目沒有檔案，但保留下來仍有參考價值
@@ -1970,6 +2076,84 @@ mod tests {
         let root = std::env::temp_dir().join("haul-reveal-test");
         std::fs::create_dir_all(&root).unwrap();
         assert!(reveal_in_folder(&root, "/nope/x.mp4").is_err());
+    }
+
+    /// 每個測試自己一個輸出資料夾，歷史檔才不會互相污染
+    fn fresh_engine(name: &str) -> Arc<Engine> {
+        let dir = std::env::temp_dir().join(format!("haul-engine-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        Engine::new(Config::new(dir, default_bin_dir()), Arc::new(|_| {})).unwrap()
+    }
+
+    #[test]
+    fn removed_items_stay_gone_after_restart() {
+        let eng = fresh_engine("remove");
+        let file = eng.out_dir().join("a.mp4");
+        std::fs::write(&file, b"x").unwrap();
+        let id = eng.push("https://x/a".into(), "a".into(), "video");
+        eng.finish(id, |i| {
+            i.status = "done".into();
+            i.path = Some(file.to_string_lossy().to_string());
+        });
+        assert_eq!(load_history(&eng.history, 500).len(), 1);
+
+        eng.remove(id).unwrap();
+        assert!(eng.snapshot().is_empty());
+        // 歷史是 append-only，所以靠 tombstone 而不是改寫檔案
+        assert!(load_history(&eng.history, 500).is_empty(), "重開後不該回來");
+        assert!(file.exists(), "移除列表項目不動檔案本身");
+    }
+
+    #[test]
+    fn clear_finished_is_persistent_too() {
+        let eng = fresh_engine("clear");
+        let file = eng.out_dir().join("b.mp4");
+        std::fs::write(&file, b"x").unwrap();
+        let id = eng.push("https://x/b".into(), "b".into(), "video");
+        eng.finish(id, |i| {
+            i.status = "done".into();
+            i.path = Some(file.to_string_lossy().to_string());
+        });
+        eng.clear_finished();
+        assert!(load_history(&eng.history, 500).is_empty());
+    }
+
+    #[test]
+    fn removing_an_unknown_id_is_an_error() {
+        let eng = fresh_engine("unknown");
+        assert!(eng.remove(99).is_err());
+    }
+
+    #[tokio::test]
+    async fn removing_an_active_item_aborts_its_task() {
+        let eng = fresh_engine("abort");
+        let id = eng.push("https://x/c".into(), "c".into(), "video");
+        eng.update(id, |i| i.status = "downloading".into());
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        // 一個永遠不會自己結束的任務，代表下載中
+        eng.spawn_tracked(id, async move {
+            let _ = rx.await;
+        });
+        assert!(eng.tasks.lock().unwrap().contains_key(&id));
+        eng.remove(id).unwrap();
+        tokio::task::yield_now().await;
+        assert!(!eng.tasks.lock().unwrap().contains_key(&id));
+        assert!(eng.snapshot().is_empty());
+        drop(tx);
+    }
+
+    /// 佔用瀏覽器的憑證要在任務被 abort 時也歸還，否則 Chrome 會留在背景
+    #[tokio::test]
+    async fn browser_lease_returns_on_drop() {
+        let eng = fresh_engine("lease");
+        let lease = BrowserLease::take(&eng);
+        assert_eq!(eng.browser_users.load(Ordering::SeqCst), 1);
+        drop(lease);
+        // 歸還是 spawn 出去的，讓它跑
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(eng.browser_users.load(Ordering::SeqCst), 0);
     }
 
     #[test]

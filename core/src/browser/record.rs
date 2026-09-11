@@ -219,6 +219,7 @@ pub async fn remux(
     mime: &str,
 ) -> Result<()> {
     let out = tokio::process::Command::new(ffmpeg)
+        .kill_on_drop(true)
         .args(["-v", "error", "-nostdin", "-y", "-i"])
         .arg(src)
         .args(remux_args(audio_only, mime))

@@ -51,6 +51,7 @@ pub fn find(bin_dir: &Path) -> Option<PathBuf> {
 /// 這個網址 gallery-dl 認不認得。用 --simulate 問，不會下載任何東西。
 pub async fn supported(bin: &Path, url: &str) -> bool {
     match Command::new(bin)
+        .kill_on_drop(true)
         .args(["--simulate", "--range", "1-1", url])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -72,6 +73,7 @@ pub async fn list(
 ) -> Result<Vec<Entry>> {
     let limit = limit.clamp(1, MAX_ITEMS);
     let mut cmd = Command::new(bin);
+    cmd.kill_on_drop(true);
     cmd.args(["--dump-json", "--range", &format!("1-{limit}")]);
     // gallery-dl 要的是檔案不是瀏覽器名稱，所以共用 yt-dlp 匯出的那份
     if let Some(f) = cookie_file {

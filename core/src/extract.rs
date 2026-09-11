@@ -112,6 +112,7 @@ fn stderr_tail(lines: &[String]) -> String {
 /// 問 yt-dlp 這個連結是什麼，不下載任何媒體。
 pub async fn probe(tools: &Tools, url: &str, browser: Option<&str>) -> Result<Probe> {
     let mut cmd = Command::new(&tools.ytdlp);
+    cmd.kill_on_drop(true);
     base_args(&mut cmd);
     cookie_args(&mut cmd, browser);
     cmd.args(["-J", "--flat-playlist"]).arg(url);
@@ -188,6 +189,8 @@ where
     F: FnMut(u64, u64),
 {
     let mut cmd = Command::new(&tools.ytdlp);
+    // 任務被取消時子程序一起收掉，不留孤兒
+    cmd.kill_on_drop(true);
     base_args(&mut cmd);
     cookie_args(&mut cmd, browser);
     cmd.args(header_args(&opts.headers));
@@ -333,6 +336,7 @@ pub async fn download_thumbnail(
     tokio::fs::create_dir_all(dir).await?;
 
     let mut cmd = Command::new(&tools.ytdlp);
+    cmd.kill_on_drop(true);
     base_args(&mut cmd);
     cookie_args(&mut cmd, browser);
     cmd.args([

@@ -63,6 +63,7 @@ async fn works(path: &Path, version_flag: &str) -> bool {
     }
     matches!(
         tokio::process::Command::new(path)
+            .kill_on_drop(true)
             .arg(version_flag)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -170,6 +171,7 @@ pub async fn ensure(
 /// 讓 yt-dlp 自己更新。各站一改版就靠這個跟上，不必等 Haul 重新發布。
 pub async fn update_ytdlp(tools: &Tools) -> Result<String> {
     let out = tokio::process::Command::new(&tools.ytdlp)
+        .kill_on_drop(true)
         .arg("--update")
         .output()
         .await

@@ -185,6 +185,7 @@ pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<Audi
     // 刻意用預設的 log 等級：-v error 會把 volumedetect 的統計一起壓掉，
     // 所以這裡改用離開碼判損毀、用 mean_volume 判無聲，不倚賴 stderr 是否為空。
     let out = tokio::process::Command::new(ffmpeg)
+        .kill_on_drop(true)
         .args(["-nostdin", "-i"])
         .arg(file)
         .args(["-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"])
@@ -223,6 +224,7 @@ pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<Audi
 /// 不去解析「Stream map '0:a:0' matches no streams」這種人類看的訊息。
 async fn stream_copies(ffmpeg: &Path, file: &Path, map: &str) -> Result<bool> {
     let status = tokio::process::Command::new(ffmpeg)
+        .kill_on_drop(true)
         .args(["-v", "error", "-nostdin", "-i"])
         .arg(file)
         .args(["-map", map, "-c", "copy", "-t", "0.01", "-f", "null", "-"])
@@ -306,6 +308,7 @@ pub fn level_for_content_type(ct: &str) -> Option<Level> {
 /// 圖片：交給 ffmpeg 解一張出來。已經有這支工具，不必為此多背一個影像函式庫。
 pub async fn verify_image(ffmpeg: &Path, file: &Path) -> Result<()> {
     let out = tokio::process::Command::new(ffmpeg)
+        .kill_on_drop(true)
         .args(["-v", "error", "-nostdin", "-i"])
         .arg(file)
         .args(["-frames:v", "1", "-f", "null", "-"])
@@ -433,6 +436,7 @@ fn sample_points(secs: f64) -> Vec<f64> {
 pub async fn verify_video(ffmpeg: &Path, file: &Path, secs: f64) -> Result<()> {
     for t in sample_points(secs) {
         let out = tokio::process::Command::new(ffmpeg)
+            .kill_on_drop(true)
             .args(["-v", "error", "-nostdin", "-ss", &format!("{t:.2}"), "-i"])
             .arg(file)
             // -map 0:v:0 在沒有視訊軌時會直接失敗，正好也當成「有沒有畫面」的檢查

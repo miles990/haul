@@ -36,6 +36,7 @@ pub async fn make(
         tokio::fs::create_dir_all(parent).await?;
     }
     let mut cmd = tokio::process::Command::new(ffmpeg);
+    cmd.kill_on_drop(true);
     cmd.args(["-v", "error", "-nostdin", "-y"]);
     if let Some(t) = seek {
         cmd.args(["-ss", &format!("{t:.2}")]);

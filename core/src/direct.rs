@@ -462,6 +462,7 @@ where
 /// 從影音混合檔裡抽出音軌。`-c copy` 不重新編碼，一首歌大約 0.2 秒。
 pub async fn extract_audio(ffmpeg: &Path, src: &Path, dest: &Path) -> Result<()> {
     let out = tokio::process::Command::new(ffmpeg)
+        .kill_on_drop(true)
         .args(["-v", "error", "-nostdin", "-y", "-i"])
         .arg(src)
         .args(["-vn", "-c:a", "copy"])

@@ -124,6 +124,12 @@ fn clear_done(state: State<'_, Arc<Engine>>) -> Vec<Item> {
     state.clear_finished()
 }
 
+/// 把一個項目從列表拿掉；還沒完成的會先取消。只動列表不動檔案。
+#[tauri::command]
+fn remove_item(state: State<'_, Arc<Engine>>, id: u64) -> Result<(), String> {
+    state.remove(id)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateInfo {
@@ -185,8 +191,8 @@ async fn update_tools(app: AppHandle) -> Result<String, String> {
 /// 萃取失敗的項目改用瀏覽器抓。偵測與下載都很久，不等它，狀態走事件回來。
 #[tauri::command]
 fn retry_with_browser(app: AppHandle, id: u64) {
-    let eng = engine(&app);
-    tauri::async_runtime::spawn(async move { eng.retry_with_browser(id).await });
+    // 由引擎 spawn 並記下把手，使用者移除這個項目時才取消得掉
+    engine(&app).start_retry_with_browser(id);
 }
 
 /// 讀目前設定（給面板初始化）
@@ -318,8 +324,7 @@ fn native_pick_folder() -> Option<String> {
 /// 萃取失敗或偵測不到媒體時，改用錄製。錄製很久，不等它，狀態走事件回來。
 #[tauri::command]
 fn record_item(app: AppHandle, id: u64) {
-    let eng = engine(&app);
-    tauri::async_runtime::spawn(async move { eng.record_item(id).await });
+    engine(&app).start_record_item(id);
 }
 
 /// 停止錄製。回 false 表示這個項目沒在錄。
@@ -424,6 +429,7 @@ fn main() {
             reveal_file,
             thumb,
             clear_done,
+            remove_item,
             update_tools,
             check_update,
             install_update,
