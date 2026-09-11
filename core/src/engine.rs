@@ -323,6 +323,12 @@ impl Engine {
     }
 
     fn fail(&self, id: u64, why: impl Into<String>) {
+        self.fail_ex(id, why, false);
+    }
+
+    /// `can_browser` 要跟失敗一起送出，分兩次會讓 --json 的消費者看到
+    /// 兩個 failed 事件
+    fn fail_ex(&self, id: u64, why: impl Into<String>, can_browser: bool) {
         let why = why.into();
 
         // 需要登入的話開一次登入頁，而不是只丟一行錯誤讓使用者自己猜
@@ -346,6 +352,7 @@ impl Engine {
         self.finish(id, |i| {
             i.status = "failed".into();
             i.error = Some(why);
+            i.can_browser = can_browser;
         });
     }
 
@@ -494,15 +501,12 @@ impl Engine {
             Err(e) => {
                 let msg = e.to_string();
                 let eligible = browser_eligible(&msg);
-                self.fail(id, msg);
-                if eligible {
-                    self.update(id, |i| i.can_browser = true);
-                    if self.cfg.browser_fallback {
-                        let me = self.clone();
-                        return vec![tokio::spawn(async move {
-                            me.retry_with_browser(id).await
-                        })];
-                    }
+                self.fail_ex(id, msg, eligible);
+                if eligible && self.cfg.browser_fallback {
+                    let me = self.clone();
+                    return vec![tokio::spawn(async move {
+                        me.retry_with_browser(id).await
+                    })];
                 }
                 return Vec::new();
             }

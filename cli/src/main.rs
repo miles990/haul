@@ -12,7 +12,8 @@ use haul_core::{
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::sync::Arc;
 
 const HELP: &str = r#"haul — 萬用媒體下載器
@@ -31,6 +32,8 @@ const HELP: &str = r#"haul — 萬用媒體下載器
       --overwrite           目標檔案已存在時照樣重抓（預設跳過）
       --cookies <瀏覽器>    用該瀏覽器的登入狀態（chrome/firefox/safari/edge…）
                             需要登入的內容用這個。Haul 不碰帳密，只讀 cookie。
+      --browser             前三層抓不到時，開一個 Chrome 把頁面跑起來攔截媒體請求
+                            （需要機器上有 Chrome / Chromium / Edge / Brave）
   -o, --out <資料夾>        輸出位置（預設 ~/Downloads/Haul）
   -c, --concurrency <N>     同時下載幾個（預設 3）
   -n, --lines <N>           logs 要看幾則（預設 50）
@@ -48,6 +51,7 @@ const HELP: &str = r#"haul — 萬用媒體下載器
   haul status --json | jq 'select(.status == "done") | .path'
   haul logs --json | jq 'select(.level == "error")'
   haul --cookies chrome https://example.com/private/video
+  haul --browser https://example.com/player/123
 "#;
 
 enum Cmd {
@@ -65,6 +69,7 @@ struct Args {
     any: bool,
     overwrite: bool,
     cookies_from: Option<String>,
+    browser: bool,
     max_height: Option<u32>,
     out: PathBuf,
     json: bool,
@@ -80,6 +85,7 @@ fn parse() -> Result<Args, String> {
         any: false,
         overwrite: false,
         cookies_from: None,
+        browser: false,
         max_height: None,
         out: default_out_dir(),
         json: false,
@@ -97,6 +103,7 @@ fn parse() -> Result<Args, String> {
             "-i" | "--image" => a.mode = Mode::Image,
             "--any" => a.any = true,
             "--overwrite" => a.overwrite = true,
+            "--browser" => a.browser = true,
             "--cookies" => {
                 let b = it.next().ok_or("--cookies 後面要接瀏覽器名稱")?;
                 if !haul_core::cookies::is_supported(&b) {
@@ -159,6 +166,14 @@ fn describe(i: &Item) -> Option<String> {
     let mb = |n: u64| format!("{:.1} MB", n as f64 / 1_048_576.0);
     Some(match i.status.as_str() {
         "resolving" => format!("[{}] 解析中 {}", i.id, i.title),
+        "browser" if i.total > 0 => format!(
+            "[{}] 瀏覽器偵測到 {} 個媒體 {}",
+            i.id, i.total, i.title
+        ),
+        "browser" => format!(
+            "[{}] 瀏覽器偵測中（頁面要按播放的話請在視窗裡按） {}",
+            i.id, i.title
+        ),
         "downloading" if i.total > 0 => format!(
             "[{}] 下載中 {} — {} / {}",
             i.id,
@@ -216,23 +231,17 @@ async fn main() -> ExitCode {
     // 事件輸出。JSON 走 stdout（給程式讀），人類敘述走 stderr，
     // 這樣 `haul --json ... > out.jsonl` 仍看得到進度。
     let json = args.json;
-    let failed = Arc::new(AtomicUsize::new(0));
-    let done = Arc::new(AtomicUsize::new(0));
-    let (f2, d2) = (failed.clone(), done.clone());
+    // 記每個項目的最終狀態而不是數事件：一個項目可以先 failed 再被瀏覽器層
+    // 救回來變 done，數事件會把它算成一勝一敗。
+    // 這段要放在 --json 的提早 return 前面：曾經放在後面，結果 --json 模式下
+    // 失敗永遠不算數、離開碼永遠是 0 —— 正好是給 agent 用的那條路徑。
+    let last: Arc<Mutex<HashMap<u64, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let last2 = last.clone();
 
     let sink: haul_core::Sink = Arc::new(move |ev: Event| {
-        // 先計數再決定怎麼印。曾經把這段放在 --json 的提早 return 後面，
-        // 結果 --json 模式下失敗永遠不算數、離開碼永遠是 0 —— 正好是
-        // 給 agent 用的那條路徑，離開碼是它唯一相信的東西。
         if let Event::Item(i) = &ev {
-            match i.status.as_str() {
-                "done" => {
-                    d2.fetch_add(1, Ordering::Relaxed);
-                }
-                "failed" => {
-                    f2.fetch_add(1, Ordering::Relaxed);
-                }
-                _ => {}
+            if i.status == "done" || i.status == "failed" || i.status == "browser" {
+                last2.lock().unwrap().insert(i.id, i.status.clone());
             }
         }
         if json {
@@ -250,6 +259,20 @@ async fn main() -> ExitCode {
             }
             Event::SetupDone => eprintln!("\r工具已就緒                    "),
             Event::SetupFailed { error } => eprintln!("\r準備工具失敗：{error}"),
+            Event::Candidates {
+                id,
+                candidates,
+                chosen,
+            } => {
+                eprintln!(
+                    "[{id}] 瀏覽器偵測到 {} 個媒體{}",
+                    candidates.len(),
+                    match chosen {
+                        Some(i) => format!("，抓第 {} 個", i + 1),
+                        None => "，沒有一個像正片".to_string(),
+                    }
+                );
+            }
             Event::Item(i) => {
                 if let Some(line) = describe(i) {
                     eprintln!("{line}");
@@ -264,6 +287,7 @@ async fn main() -> ExitCode {
     cfg.allow_html = args.any;
     cfg.overwrite = args.overwrite;
     cfg.cookies_from = args.cookies_from.clone();
+    cfg.browser_fallback = args.browser;
 
     let eng = match Engine::new(cfg, sink) {
         Ok(e) => e,
@@ -299,7 +323,13 @@ async fn main() -> ExitCode {
         let _ = h.await;
     }
 
-    let (ok, bad) = (done.load(Ordering::Relaxed), failed.load(Ordering::Relaxed));
+    let (ok, bad) = {
+        let m = last.lock().unwrap();
+        (
+            m.values().filter(|s| *s == "done").count(),
+            m.values().filter(|s| *s != "done").count(),
+        )
+    };
     if !json {
         eprintln!("\n完成 {ok}，失敗 {bad}  →  {}", args.out.display());
     }
