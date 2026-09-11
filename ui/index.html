@@ -270,6 +270,16 @@
   .thumb.has::before { content: none; }
   .thumb.has img { display: block; }
 
+  /* 來源分組：清單／圖庫／網頁展開出來的收在一個標題列底下，點標題展開收起 */
+  .grp-head { cursor: pointer; }
+  .grp-head:hover { background: #20262c; }
+  .grp-head .name::before { content: '▸ '; color: var(--dim); }
+  .grp.open .grp-head .name::before { content: '▾ '; }
+  .grp-kids[hidden] { display: none; }
+  .grp-kids .track { padding-left: 44px; }
+  .grp-kids .track .thumb { width: 36px; height: 36px; font-size: 14px; }
+  .grp-kids .track { grid-template-columns: 36px 1fr auto auto; }
+
   /* 原檔已不在：留著紀錄，但調暗、不再假裝點得開 */
   .track[data-missing] { opacity: 0.5; cursor: default; }
   .track[data-missing]:hover { background: none; }
@@ -754,6 +764,9 @@
       'reveal.finder': '在 Finder 顯示', 'reveal.explorer': '在檔案總管顯示',
       'tally.running': '{n} 進行中', 'tally.done': '{n} 完成', 'tally.failed': '{n} 失敗',
       'cand.manifest': '串流清單', 'cand.file': '單檔', 'cand.chosen': '已選', 'cand.pick': '抓這個',
+      'group.files': '{n} 個檔案', 'group.progress': '{d} / {n} 完成', 'group.failed': '{n} 失敗',
+      'group.remove': '移除整組', 'group.confirm': '這組還有項目沒完成，移除會取消它們的下載。',
+      'group.toggle': '展開／收起',
       'set.ui': '介面', 'set.language': '語言', 'lang.system': '跟隨系統',
       'set.download': '下載', 'set.outDir': '輸出資料夾', 'set.outDefault': '預設（~/Downloads/Haul）',
       'set.choose': '選擇…', 'set.restart': '重新啟動後生效', 'set.quality': '畫質上限', 'set.noLimit': '不設限',
@@ -802,6 +815,9 @@
       'reveal.finder': 'Show in Finder', 'reveal.explorer': 'Show in Explorer',
       'tally.running': '{n} running', 'tally.done': '{n} done', 'tally.failed': '{n} failed',
       'cand.manifest': 'stream manifest', 'cand.file': 'file', 'cand.chosen': 'chosen', 'cand.pick': 'Get this',
+      'group.files': '{n} files', 'group.progress': '{d} / {n} done', 'group.failed': '{n} failed',
+      'group.remove': 'Remove all', 'group.confirm': 'Some items in this group are not finished — removing cancels their downloads.',
+      'group.toggle': 'Expand / collapse',
       'set.ui': 'Interface', 'set.language': 'Language', 'lang.system': 'System',
       'set.download': 'Download', 'set.outDir': 'Output folder', 'set.outDefault': 'Default (~/Downloads/Haul)',
       'set.choose': 'Choose…', 'set.restart': 'Takes effect after restart', 'set.quality': 'Quality cap', 'set.noLimit': 'No limit',
@@ -835,6 +851,7 @@
     for (const el of document.querySelectorAll('[data-i18n-aria-label]')) el.setAttribute('aria-label', t(el.dataset.i18nAriaLabel));
     // 下面這些在啟動流程走到這裡時都已宣告；hint 的預設字由 data-i18n 一起換掉
     for (const row of rows.values()) if (row.item) paint(row.item);
+    for (const g of groups.values()) refreshGroup(g);
     updateTabs();
     updateTally();
   }
@@ -947,23 +964,24 @@
       if (el.dataset.path) invoke('reveal_file', { path: el.dataset.path }).catch(err => say(String(err), true));
     });
     refs.x.addEventListener('click', ev => { ev.stopPropagation(); askRemove(it.id, el, refs); });
-    refs.src.addEventListener('click', async ev => {
-      ev.stopPropagation();
-      const url = refs.src.dataset.url;
-      if (await copyText(url)) {
-        refs.src.classList.add('copied');
-        refs.src.textContent = t('row.copied');
-        setTimeout(() => { refs.src.textContent = url + '\u200E'; refs.src.classList.remove('copied'); }, 900);
-      } else {
-        say(t('row.copyFailed'), true);
-      }
-    });
+    refs.src.addEventListener('click', ev => { ev.stopPropagation(); copyFrom(refs.src); });
     refs.yes.addEventListener('click', ev => { ev.stopPropagation(); doRemove(it.id, el); });
     refs.no.addEventListener('click', ev => { ev.stopPropagation(); refs.confirm.hidden = true; });
     return { el, refs };
   }
 
   const TERMINAL = new Set(['done', 'failed']);
+
+  async function copyFrom(srcEl) {
+    const url = srcEl.dataset.url;
+    if (await copyText(url)) {
+      srcEl.classList.add('copied');
+      srcEl.textContent = t('row.copied');
+      setTimeout(() => { srcEl.textContent = url + '\u200E'; srcEl.classList.remove('copied'); }, 900);
+    } else {
+      say(t('row.copyFailed'), true);
+    }
+  }
 
   /* 移除：完成或失敗的直接拿掉；還沒完成的先在列內問一次，因為那等於取消下載 */
   function askRemove(id, el, refs) {
@@ -982,7 +1000,9 @@
   function dropRow(id) {
     const row = rows.get(id);
     if (!row) return;
+    const g = groupOf(row.el);
     row.el.remove();
+    if (g) refreshGroup(g);
     rows.delete(id);
     thumbAsked.delete(id);
     updateTabs();
@@ -1004,22 +1024,143 @@
     updateTabs();
   }
   function updateTabs() {
-    nActive.textContent = activeBox.childElementCount;
-    nDone.textContent = doneBox.childElementCount;
-    const box = tab === 'done' ? doneBox : activeBox;
+    let done = 0;
+    for (const { el } of rows.values()) if (el.dataset.status === 'done') done++;
+    nActive.textContent = rows.size - done;
+    nDone.textContent = done;
     empty.textContent = t('empty.' + tab);
-    empty.hidden = box.childElementCount > 0;
+    empty.hidden = (tab === 'done' ? done : rows.size - done) > 0;
   }
   for (const b of document.querySelectorAll('.tab')) {
     b.addEventListener('click', () => showTab(b.dataset.tab));
   }
 
-  /* 依狀態放到對的分頁：佇列依加入順序，已完成新的在上 */
-  function place(el, status) {
-    const box = status === 'done' ? doneBox : activeBox;
-    if (el.parentNode !== box) {
-      if (status === 'done') box.prepend(el); else box.appendChild(el);
+  // ---------------------------------------------------------- 來源分組
+
+  /** `${tab}:${groupId}` -> { wrap, head, kids, refs } */
+  const groups = new Map();
+  const groupOpen = new Set(); // 使用者這個 session 內展開過的組
+
+  function groupKey(box, it) { return (box === doneBox ? 'done' : 'active') + ':' + it.group; }
+
+  function makeGroup(box, it) {
+    const key = groupKey(box, it);
+    const wrap = document.createElement('div');
+    wrap.className = 'grp';
+    wrap.dataset.group = it.group;
+    wrap.innerHTML =
+      '<div class="track grp-head" data-status="group">' +
+        '<span class="thumb" data-kind="' + it.kind + '"><img alt=""></span>' +
+        '<span class="name"></span>' +
+        '<span class="src"></span>' +
+        '<span class="stat"></span>' +
+        '<button type="button" class="x">×</button>' +
+        '<button type="button" class="show"></button>' +
+        '<div class="confirm" hidden><span></span>' +
+          '<button type="button" class="yes primary"></button>' +
+          '<button type="button" class="no"></button></div>' +
+      '</div>' +
+      '<div class="grp-kids"></div>';
+    const head = wrap.querySelector('.grp-head');
+    const kids = wrap.querySelector('.grp-kids');
+    const refs = {
+      thumb: head.querySelector('.thumb'), img: head.querySelector('.thumb img'),
+      name: head.querySelector('.name'), src: head.querySelector('.src'),
+      stat: head.querySelector('.stat'), x: head.querySelector('.x'), show: head.querySelector('.show'),
+      confirm: head.querySelector('.confirm'), confirmText: head.querySelector('.confirm > span'),
+      yes: head.querySelector('.yes'), no: head.querySelector('.no'),
+    };
+    // 佇列分頁預設展開（看得到進度），已完成預設收起
+    const open = groupOpen.has(key) || box === activeBox;
+    wrap.classList.toggle('open', open);
+    kids.hidden = !open;
+    head.addEventListener('click', e => {
+      if (e.target.closest('button, .src')) return;
+      const now = !wrap.classList.contains('open');
+      wrap.classList.toggle('open', now);
+      kids.hidden = !now;
+      if (now) groupOpen.add(key); else groupOpen.delete(key);
+    });
+    refs.src.addEventListener('click', ev => { ev.stopPropagation(); copyFrom(refs.src); });
+    refs.x.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const ids = [...kids.querySelectorAll('.track')].map(k => Number(k.dataset.id));
+      const unfinished = [...kids.querySelectorAll('.track')].some(k => !TERMINAL.has(k.dataset.status));
+      if (!unfinished) return ids.forEach(id => doRemove(id, rows.get(id).el));
+      refs.confirmText.textContent = t('group.confirm');
+      refs.confirm.hidden = false;
+    });
+    refs.yes.addEventListener('click', ev => {
+      ev.stopPropagation();
+      refs.confirm.hidden = true;
+      [...kids.querySelectorAll('.track')].map(k => Number(k.dataset.id)).forEach(id => doRemove(id, rows.get(id).el));
+    });
+    refs.no.addEventListener('click', ev => { ev.stopPropagation(); refs.confirm.hidden = true; });
+    refs.show.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const first = kids.querySelector('.track[data-status="done"]');
+      if (first && first.dataset.path) invoke('reveal_file', { path: first.dataset.path }).catch(err => say(String(err), true));
+    });
+    const g = { wrap, head, kids, refs, title: it.groupTitle || '', url: it.groupUrl || '' };
+    groups.set(key, g);
+    if (box === doneBox) box.prepend(wrap); else box.appendChild(wrap);
+    return g;
+  }
+
+  /* 標題列的文字、進度與縮圖都從子項目算出來 */
+  function refreshGroup(g) {
+    const kids = [...g.kids.querySelectorAll('.track')];
+    if (kids.length === 0) {
+      g.wrap.remove();
+      for (const [k, v] of groups) if (v === g) groups.delete(k);
+      return;
     }
+    const done = kids.filter(k => k.dataset.status === 'done').length;
+    const failed = kids.filter(k => k.dataset.status === 'failed').length;
+    g.refs.name.textContent = g.title;
+    g.refs.name.title = g.title;
+    g.refs.src.dataset.url = g.url;
+    g.refs.src.textContent = g.url + '\u200E';
+    g.refs.src.title = t('row.copySrc');
+    g.refs.x.title = t('group.remove');
+    g.refs.yes.textContent = t('row.confirmYes');
+    g.refs.no.textContent = t('row.confirmNo');
+    g.refs.show.textContent = revealLabel();
+    g.head.title = t('group.toggle');
+    let stat = done === kids.length ? t('group.files', { n: kids.length }) : t('group.progress', { d: done, n: kids.length });
+    if (failed) stat += ' · ' + t('group.failed', { n: failed });
+    g.refs.stat.textContent = stat;
+    g.head.dataset.status = done === kids.length ? 'done' : (failed === kids.length ? 'failed' : 'group');
+    // 縮圖借第一個已經有縮圖的子項目
+    const withThumb = kids.find(k => k.querySelector('.thumb.has'));
+    if (withThumb) {
+      g.refs.img.src = withThumb.querySelector('.thumb img').src;
+      g.refs.thumb.classList.add('has');
+    }
+  }
+
+  function groupOf(el) {
+    const kids = el.parentNode;
+    if (!kids || !kids.classList.contains('grp-kids')) return null;
+    for (const g of groups.values()) if (g.kids === kids) return g;
+    return null;
+  }
+
+  /* 依狀態放到對的分頁：佇列依加入順序，已完成新的在上；有來源的收進該來源的組 */
+  function place(el, it) {
+    const box = it.status === 'done' ? doneBox : activeBox;
+    let container = box;
+    if (it.group != null) {
+      const g = groups.get(groupKey(box, it)) || makeGroup(box, it);
+      container = g.kids;
+    }
+    if (el.parentNode !== container) {
+      const prev = groupOf(el);
+      if (it.status === 'done') container.prepend(el); else container.appendChild(el);
+      if (prev) refreshGroup(prev);
+    }
+    const g = groupOf(el);
+    if (g) refreshGroup(g);
     updateTabs();
   }
 
@@ -1032,6 +1173,8 @@
       if (!b64) return;
       refs.img.src = 'data:image/jpeg;base64,' + b64;
       refs.thumb.classList.add('has');
+      const g = groupOf(el);
+      if (g) refreshGroup(g);
     }).catch(() => {
       // 原檔已不在（或讀不到）：留著紀錄但不再假裝點得開
       el.dataset.missing = '1';
@@ -1059,7 +1202,8 @@
     refs.show.textContent = revealLabel();
 
     el.dataset.status = it.status;
-    place(el, it.status);
+    el.dataset.id = it.id;
+    place(el, it);
     // 狀態變了就把「還沒完成要不要移除」的問句收掉——答案可能已經過期
     if (TERMINAL.has(it.status)) refs.confirm.hidden = true;
     refs.thumb.dataset.kind = it.kind;
@@ -1137,6 +1281,7 @@
   function reset(items) {
     rows.clear();
     thumbAsked.clear();
+    groups.clear();
     activeBox.replaceChildren();
     doneBox.replaceChildren();
     items.forEach(paint);
@@ -1231,7 +1376,8 @@
   // 完成的項目點一下就播放。用委派監聽，佇列再長也只有一個 listener。
   queue.addEventListener('click', e => {
     const row = e.target.closest('.track');
-    if (!row || row.dataset.status !== 'done' || !row.dataset.path || row.dataset.missing) return;
+    if (!row || row.classList.contains('grp-head')) return;
+    if (row.dataset.status !== 'done' || !row.dataset.path || row.dataset.missing) return;
     invoke('open_file', { path: row.dataset.path })
       .catch(err => say(String(err), true));
   });

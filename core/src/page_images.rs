@@ -16,8 +16,9 @@ use crate::direct::UA;
 /// 一頁最多展開幾張，免得一個網址就把佇列灌爆
 pub const MAX_ITEMS: usize = 200;
 
-/// 小於這個大小的多半是圖示、徽章、追蹤像素
-pub const MIN_BYTES: u64 = 8 * 1024;
+/// 小於這個大小的多半是圖示、徽章、追蹤像素。跟直接下載的最小檔案門檻一致，
+/// 否則這裡放行、下載完又被擋，變成一排失敗
+pub const MIN_BYTES: u64 = 10_240;
 
 /// 同時問幾張的大小
 const HEAD_CONCURRENCY: usize = 8;
@@ -243,7 +244,13 @@ pub async fn scrape(client: &Client, url: &str, cookie: Option<&str>) -> Result<
                         return None;
                     }
                 }
-                if let Some(len) = res.content_length() {
+                // 不用 res.content_length()：它回的是 body 大小，HEAD 沒有 body 永遠是 0
+                let len = res
+                    .headers()
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok());
+                if let Some(len) = len {
                     if len < MIN_BYTES {
                         return None;
                     }

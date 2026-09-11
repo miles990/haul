@@ -837,17 +837,22 @@ impl Engine {
         title: String,
         items: Vec<(Job, String)>,
     ) -> Vec<(u64, Job)> {
+        // 先去重，才知道到底有幾項：只有一項就不算一組，畫面上當普通的一列
+        let fresh: Vec<(String, Job, String)> = items
+            .into_iter()
+            .filter_map(|(job, label)| {
+                let key = match &job {
+                    Job::Ytdlp { url } => url.clone(),
+                    Job::Direct { media, .. } | Job::Browser { media, .. } => media.clone(),
+                    Job::Recording { title } => title.clone(),
+                };
+                self.seen.lock().unwrap().insert(key.clone()).then_some((key, job, label))
+            })
+            .collect();
+        let grouped = fresh.len() > 1;
         let mut jobs = Vec::new();
         let mut first = true;
-        for (job, label) in items {
-            let key = match &job {
-                Job::Ytdlp { url } => url.clone(),
-                Job::Direct { media, .. } | Job::Browser { media, .. } => media.clone(),
-                Job::Recording { title } => title.clone(),
-            };
-            if !self.seen.lock().unwrap().insert(key.clone()) {
-                continue;
-            }
+        for (key, job, label) in fresh {
             let item_id = if first {
                 first = false;
                 id
@@ -858,9 +863,11 @@ impl Engine {
             self.update(item_id, |i| {
                 i.input = key;
                 i.title = label;
-                i.group = Some(id);
-                i.group_title = Some(t);
-                i.group_url = Some(u);
+                if grouped {
+                    i.group = Some(id);
+                    i.group_title = Some(t);
+                    i.group_url = Some(u);
+                }
             });
             jobs.push((item_id, job));
         }
@@ -2195,6 +2202,17 @@ mod tests {
         // 每一列的 input 都是自己那個檔的網址，來源網址在 group_url
         assert_eq!(snap[0].input, "https://x/a.png");
         assert_eq!(snap[1].input, "https://x/b.png");
+    }
+
+    #[test]
+    fn a_single_expanded_item_is_not_a_group() {
+        let eng = fresh_engine("expand-one");
+        let id = eng.push("https://x/page".into(), "page".into(), "image");
+        let items = vec![(job_direct("https://x/only.png"), "only".to_string())];
+        eng.expand(id, "https://x/page", "image", "My Page".into(), items);
+        let it = eng.snapshot().into_iter().next().unwrap();
+        assert!(it.group.is_none(), "一張圖不該顯示成一組");
+        assert_eq!(it.input, "https://x/only.png");
     }
 
     fn job_direct(url: &str) -> Job {
