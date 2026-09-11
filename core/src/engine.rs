@@ -10,6 +10,7 @@ use crate::direct;
 use crate::extract::{self, Mode, Probe};
 use crate::gallery;
 use crate::log::Logger;
+use crate::page_images;
 use crate::thumb;
 use crate::tools::{self, Tools};
 use crate::verify;
@@ -678,6 +679,53 @@ impl Engine {
     ) -> Vec<JoinHandle<()>> {
         let kind = kind_for(mode);
         let id = self.push(input.clone(), short(&input), kind);
+        self.start(id, input, mode, opts).await
+    }
+
+    /// 失敗的項目重來一次：同一列、同一個 id，走跟新加入完全相同的路。
+    /// 站點改版後 `haul update` 過、或只是網路抖了一下，重試就夠了。
+    pub fn start_retry(self: &Arc<Self>, id: u64, opts: extract::Options) -> Result<(), String> {
+        let item = self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| i.id == id)
+            .cloned()
+            .ok_or("沒有這個項目")?;
+        if item.status != "failed" {
+            return Err("只有失敗的項目能重試".into());
+        }
+        self.update(id, |i| {
+            i.status = "queued".into();
+            i.error = None;
+            i.can_browser = false;
+            i.can_record = false;
+            i.source = None;
+            i.bytes = 0;
+            i.total = 0;
+            i.secs = None;
+        });
+        self.log.info("item.retry", serde_json::json!({ "id": id }));
+        let me = self.clone();
+        let mode = Mode::parse(&item.kind);
+        // 不用 spawn_tracked：真正的下載任務會在 start 裡用同一個 id 註冊，
+        // 這層外殼結束時的註銷會把它的把手洗掉
+        tokio::spawn(async move {
+            me.start(id, item.input, mode, opts).await;
+        });
+        Ok(())
+    }
+
+    /// 解析一個已經在列表裡的項目並展開成下載任務
+    async fn start(
+        self: &Arc<Self>,
+        id: u64,
+        input: String,
+        mode: Mode,
+        opts: extract::Options,
+    ) -> Vec<JoinHandle<()>> {
+        let kind = kind_for(mode);
         self.update(id, |i| i.status = "resolving".into());
 
         let tools = match self.tools().await {
@@ -688,7 +736,7 @@ impl Engine {
             }
         };
 
-        let resolution = match self.resolve(&tools, &input).await {
+        let resolution = match self.resolve(&tools, &input, mode).await {
             Ok(r) => r,
             Err(e) => {
                 let msg = e.to_string();
@@ -782,7 +830,7 @@ impl Engine {
     }
 
     /// 決定一個輸入該怎麼抓
-    async fn resolve(&self, tools: &Tools, input: &str) -> Result<Resolution> {
+    async fn resolve(&self, tools: &Tools, input: &str, mode: Mode) -> Result<Resolution> {
         // 先備妥 cookie 檔，gallery-dl 與直接抓取都要用
         let cookie_file = self.cookie_file(tools, input).await;
         let cookie_file = cookie_file.as_deref();
@@ -874,6 +922,42 @@ impl Engine {
                         },
                         title: found.title,
                     }),
+                    // 圖片模式的最後一層：一般網頁上的圖片（GitHub README、文章）。
+                    // 只在圖片模式走，影片模式下一個沒有媒體的頁面該讓使用者看到
+                    // yt-dlp 的原因並選擇瀏覽器或錄製。
+                    Err(_) if mode == Mode::Image => {
+                        let cookie = cookie_file
+                            .and_then(|f| cookies::header_for_host(f, &host_of(input)));
+                        match page_images::scrape(&self.client, input, cookie.as_deref()).await {
+                            Ok(page) => {
+                                let sub = sanitize(&page.title);
+                                self.log.info(
+                                    "page.images",
+                                    serde_json::json!({ "input": cookies::redact(input), "items": page.images.len() }),
+                                );
+                                Ok(Resolution::Playlist {
+                                    title: sub.clone(),
+                                    items: page
+                                        .images
+                                        .into_iter()
+                                        .map(|img| {
+                                            let label = img.title.clone();
+                                            (
+                                                Job::Direct {
+                                                    media: img.url,
+                                                    title: img.title,
+                                                    content_type: img.content_type,
+                                                    subdir: Some(sub.clone()),
+                                                },
+                                                label,
+                                            )
+                                        })
+                                        .collect(),
+                                })
+                            }
+                            Err(e) => Err(anyhow::anyhow!("{yt_err}\n（網頁圖片：{e}）")),
+                        }
+                    }
                     // 沒有直接規則時，該讓使用者看到的是 yt-dlp 的原因
                     Err(_) => Err(match gallery_hint {
                         Some(h) => anyhow::anyhow!("{yt_err}\n{h}"),
@@ -1672,8 +1756,17 @@ pub fn load_history(path: &Path, cap: usize) -> Vec<Item> {
         .filter(|i| i.status == "removed")
         .map(|i| i.id)
         .collect();
-    let mut items: Vec<Item> = all
+    // 同一個 id 可能有多行（失敗後重試成功），只算最後那筆
+    let mut last: HashMap<u64, Item> = HashMap::new();
+    let mut order: Vec<u64> = Vec::new();
+    for i in all {
+        if last.insert(i.id, i.clone()).is_none() {
+            order.push(i.id);
+        }
+    }
+    let mut items: Vec<Item> = order
         .into_iter()
+        .filter_map(|id| last.remove(&id))
         .filter(|i| i.status != "removed" && !removed.contains(&i.id))
         .filter(|i| match &i.path {
             Some(p) => Path::new(p).is_file(),
@@ -2116,6 +2209,40 @@ mod tests {
         });
         eng.clear_finished();
         assert!(load_history(&eng.history, 500).is_empty());
+    }
+
+    #[test]
+    fn history_keeps_only_the_last_line_per_id() {
+        // 重試會讓同一個 id 先有 failed 再有 done 兩行，只能算一筆
+        let eng = fresh_engine("retry-history");
+        let file = eng.out_dir().join("r.mp4");
+        std::fs::write(&file, b"x").unwrap();
+        let id = eng.push("https://x/r".into(), "r".into(), "video");
+        eng.finish(id, |i| {
+            i.status = "failed".into();
+            i.error = Some("boom".into());
+        });
+        eng.finish(id, |i| {
+            i.status = "done".into();
+            i.error = None;
+            i.path = Some(file.to_string_lossy().to_string());
+        });
+        let got = load_history(&eng.history, 500);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].status, "done");
+    }
+
+    #[tokio::test]
+    async fn retry_only_applies_to_failed_items() {
+        let eng = fresh_engine("retry-guard");
+        let id = eng.push("https://x/q".into(), "q".into(), "video");
+        assert!(eng.start_retry(id, extract::Options::default()).is_err());
+        eng.update(id, |i| i.status = "failed".into());
+        assert!(eng.start_retry(id, extract::Options::default()).is_ok());
+        // 重試後那列立刻回到佇列狀態，錯誤清掉
+        let it = eng.snapshot().into_iter().find(|i| i.id == id).unwrap();
+        assert_ne!(it.status, "failed");
+        assert!(it.error.is_none());
     }
 
     #[test]

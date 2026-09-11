@@ -130,6 +130,18 @@ fn remove_item(state: State<'_, Arc<Engine>>, id: u64) -> Result<(), String> {
     state.remove(id)
 }
 
+/// 失敗的項目重來一次，同一列同一個 id
+#[tauri::command]
+fn retry_item(state: State<'_, Arc<Engine>>, id: u64, quality: Option<u32>) -> Result<(), String> {
+    state.start_retry(
+        id,
+        Options {
+            max_height: quality,
+            ..Default::default()
+        },
+    )
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateInfo {
@@ -430,6 +442,7 @@ fn main() {
             thumb,
             clear_done,
             remove_item,
+            retry_item,
             update_tools,
             check_update,
             install_update,
