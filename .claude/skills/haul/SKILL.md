@@ -32,7 +32,7 @@ description: Use when the user wants to download video, audio, or music from a U
 ```bash
 haul <網址>...                      # 下載影片
 haul -a <網址>...                   # 只要聲音（抽原始音軌，不重新編碼）
-haul -i <網址>...                   # 只要封面圖／縮圖
+haul -i <網址>...                   # 只要圖片：影片連結抓封面、圖片網址直接抓、一般網頁抓頁上的圖
 haul -q 1080 <網址>                 # 畫質上限，避免一支 4K 吃掉幾 GB
 haul -o /path/to/dir <網址>         # 指定輸出資料夾（預設 ~/Downloads/Haul）
 haul -c 5 <網址>...                 # 同時下載 5 個（預設 3）
@@ -57,9 +57,11 @@ haul --json <網址> > events.jsonl
 
 ```jsonl
 {"event":"item","id":1,"status":"downloading","title":"…","bytes":8388608,"total":45568216}
-{"event":"item","id":1,"status":"done","title":"…","file":"…​.mp4","path":"/Users/…/x.mp4","secs":222.8}
+{"event":"item","id":1,"status":"done","title":"…","file":"…​.mp4","path":"/Users/…/x.mp4","secs":222.8,"verified":"media","thumb":"/Users/…/.haul-thumbs/….jpg"}
 {"event":"item","id":2,"status":"failed","title":"…","error":"…"}
 ```
+
+`thumb` 是一張 96×96 的 JPEG（影片抽一格、音樂抽封面、圖片縮圖），產不出來就沒有這個欄位。
 
 拿剛下載好的檔案路徑：
 
