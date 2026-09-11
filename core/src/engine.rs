@@ -888,6 +888,7 @@ impl Engine {
                 mode,
                 opts,
                 self.browser().as_deref(),
+                &[],
                 &self.staging,
                 progress,
             )
@@ -911,12 +912,16 @@ impl Engine {
                         "cookie": cookie.is_some(),
                     }),
                 );
+                let headers: Vec<(String, String)> = cookie
+                    .into_iter()
+                    .map(|c| ("cookie".to_string(), c))
+                    .collect();
                 direct::download(
                     &self.client,
                     media,
                     &raw,
                     self.cfg.allow_html,
-                    cookie.as_deref(),
+                    &headers,
                     progress,
                 )
                 .await?;

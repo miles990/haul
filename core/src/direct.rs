@@ -360,7 +360,7 @@ pub async fn download<F>(
     media_url: &str,
     dest: &Path,
     allow_html: bool,
-    cookie: Option<&str>,
+    headers: &[(String, String)],
     mut on_progress: F,
 ) -> Result<u64>
 where
@@ -374,8 +374,9 @@ where
     for attempt in 1..=MAX_ATTEMPTS {
         wait_turn(&host).await;
         let mut req = client.get(media_url).header("user-agent", ua);
-        if let Some(c) = cookie {
-            req = req.header("cookie", c);
+        for (k, v) in headers {
+            // 攔到的 User-Agent 要蓋掉我們的，否則 CDN 看到兩個不同身分
+            req = req.header(k.as_str(), v.as_str());
         }
         let r = req.send().await?;
         let status = r.status();

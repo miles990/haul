@@ -82,6 +82,14 @@ fn cookie_args(cmd: &mut Command, browser: Option<&str>) {
     }
 }
 
+/// 瀏覽器攔到的請求 header 要原樣帶去重放，否則 CDN 認不得這個請求。
+pub fn header_args(headers: &[(String, String)]) -> Vec<String> {
+    headers
+        .iter()
+        .flat_map(|(k, v)| ["--add-headers".to_string(), format!("{k}:{v}")])
+        .collect()
+}
+
 fn stderr_tail(lines: &[String]) -> String {
     let msg = lines
         .iter()
@@ -170,6 +178,7 @@ pub async fn download<F>(
     mode: Mode,
     opts: Options,
     browser: Option<&str>,
+    headers: &[(String, String)],
     staging: &Path,
     mut on_progress: F,
 ) -> Result<Downloaded>
@@ -179,6 +188,7 @@ where
     let mut cmd = Command::new(&tools.ytdlp);
     base_args(&mut cmd);
     cookie_args(&mut cmd, browser);
+    cmd.args(header_args(headers));
     cmd.args([
         "--newline",
         "--no-playlist",
@@ -364,6 +374,19 @@ pub async fn download_thumbnail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_args_are_one_add_headers_per_pair() {
+        let got = header_args(&[
+            ("Referer".into(), "https://x/".into()),
+            ("Cookie".into(), "a=b".into()),
+        ]);
+        assert_eq!(
+            got,
+            ["--add-headers", "Referer:https://x/", "--add-headers", "Cookie:a=b"]
+        );
+        assert!(header_args(&[]).is_empty());
+    }
 
     #[test]
     fn mode_parsing() {
