@@ -102,6 +102,8 @@ haul logs -n 30                                    # 人看的版本
 
 3. **圖庫或漫畫頁抓不到** → 錯誤訊息會提示安裝 `gallery-dl`（`pipx install gallery-dl`）。裝好後 haul 會自動用它萃取網址，下載與驗證仍由 haul 做。需要特殊 Referer 或高度 JS 渲染的站仍然不行，別硬試。
 
+   **Instagram / Twitter 這類個人頁沒登入根本不給看**（Instagram 未登入是 401，yt-dlp 會說 `Unable to extract data`），一定要帶 `--cookies chrome`；GUI 則要在設定面板把 cookie 來源設成瀏覽器。帶了 cookie 還失敗、錯誤是「HTTP redirect to home page」或 429 → 帳號被 Instagram 暫時限流（重試太多次會這樣），等 30–60 分鐘再試，不要一直戳。
+
    圖庫**部分失敗是常態**（實測 222 張成功 173 張，失敗全是對方節流），離開碼會是 1。**要補齊就重跑同一個網址**——已下載好的會標成 `existing` 跳過，不會重複下載。真的要重抓才加 `--overwrite`。
 
 4. **HTTP 401 / 403** → 內容是私人的，或需要登入。加 `--cookies <瀏覽器>`
