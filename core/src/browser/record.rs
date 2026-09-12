@@ -25,14 +25,17 @@ pub enum Stop {
 
 /// 三個停止條件先到先贏。
 ///
-/// 「媒體結束」要先播過才算：使用者可能還沒按播放，一開始的安靜不是結束。
-/// 結束後再等 5 秒是給「下一首」或廣告後正片一個機會。
+/// 「媒體結束」有兩條路：頁面自己說播完了（媒體元素的 `ended`）就立刻停；
+/// 沒有事件的頁面則靠「先播過、然後安靜 5 秒」。前者是為了自動接播下一首的
+/// 站（實測 Suno 換歌無縫、沒有靜音，只靠安靜窗會一路錄到上限）；後者的
+/// 5 秒是給廣告後正片一個機會。要先播過才算：使用者可能還沒按播放。
 #[derive(Debug)]
 pub struct StopWhen {
     start: Instant,
     max: Duration,
     user: bool,
     ever_played: bool,
+    ended: bool,
     quiet_since: Option<Instant>,
 }
 
@@ -45,12 +48,18 @@ impl StopWhen {
             max,
             user: false,
             ever_played: false,
+            ended: false,
             quiet_since: None,
         }
     }
 
     pub fn user_stopped(&mut self) {
         self.user = true;
+    }
+
+    /// 頁面回報媒體元素播完了（或被換成下一首）
+    pub fn media_ended(&mut self) {
+        self.ended = true;
     }
 
     /// 目標分頁每秒回報一次「有沒有媒體在播」
@@ -69,6 +78,9 @@ impl StopWhen {
         }
         if now.duration_since(self.start) >= self.max {
             return Some(Stop::MaxDuration);
+        }
+        if self.ended {
+            return Some(Stop::MediaEnded);
         }
         match self.quiet_since {
             Some(q) if now.duration_since(q) >= Self::QUIET => Some(Stop::MediaEnded),
@@ -140,10 +152,23 @@ const RECORD_JS: &str = r#"(async () => {
     // 換頁會殺掉這裡的一切：先停，讓最後一個 chunk 送出去
     window.addEventListener('pagehide', stop);
     window.haulStop = stop;
+    // 頁面自己說播完了，比等安靜窗早也準：自動接播下一首的站換歌時沒有靜音。
+    // 換下一首時元素會被重設（emptied），也算這段結束。只認播超過 2 秒的元素，
+    // 音效與解鎖自動播放用的 0.1 秒空白聲不算。
+    const hooked = new WeakSet();
+    const hook = x => {
+      if (hooked.has(x)) return;
+      hooked.add(x);
+      const done = why => { if (x.__haulPlayed) send({ type: 'ended', why }); };
+      x.addEventListener('ended', () => done('ended'));
+      x.addEventListener('emptied', () => done('emptied'));
+    };
     // 每秒回報有沒有媒體在播，給「播完自動停」用。
     // 跨網域 iframe 裡的播放器看不到 —— 那種情況只剩使用者停止與上限
     window.__haulWatch = setInterval(() => {
       const m = [...document.querySelectorAll('video,audio')];
+      m.forEach(hook);
+      m.forEach(x => { if (!x.paused && x.currentTime > 2) x.__haulPlayed = true; });
       const playing = m.some(x => !x.paused && !x.ended && x.readyState > 2);
       send({ type: 'playing', playing, count: m.length });
     }, 1000);
@@ -407,6 +432,7 @@ pub async fn record(
                     Some("playing") => {
                         when.playing(msg["playing"].as_bool().unwrap_or(false), Instant::now());
                     }
+                    Some("ended") => when.media_ended(),
                     Some("stopped") => {
                         // 我們沒下令就停了：藍條的「停止分享」或換頁，算使用者停的
                         outcome.get_or_insert(Stop::User);
@@ -522,6 +548,17 @@ mod tests {
     }
 
     #[test]
+    fn page_reported_end_stops_without_waiting_for_quiet() {
+        let t0 = Instant::now();
+        let mut s = StopWhen::new(t0, Duration::from_secs(3600));
+        s.playing(true, t0 + Duration::from_secs(1));
+        // 換下一首：一直有東西在播，安靜窗永遠不會到
+        s.media_ended();
+        s.playing(true, t0 + Duration::from_secs(2));
+        assert_eq!(s.check(t0 + Duration::from_secs(2)), Some(Stop::MediaEnded));
+    }
+
+    #[test]
     fn new_playback_resets_quiet_window() {
         let t0 = Instant::now();
         let mut s = StopWhen::new(t0, Duration::from_secs(3600));
@@ -630,11 +667,16 @@ mod tests {
 
     /// 用 Haul 自己下載的 ffmpeg 產一支 3 秒的真影片。找不到就略過。
     fn make_clip(dir: &Path) -> Option<std::path::PathBuf> {
+        make_clip_secs(dir, 3)
+    }
+
+    fn make_clip_secs(dir: &Path, secs: u32) -> Option<std::path::PathBuf> {
         let ffmpeg = crate::engine::default_bin_dir().join("ffmpeg");
         if !ffmpeg.is_file() {
             return None;
         }
-        let out = dir.join("clip.mp4");
+        let out = dir.join(format!("clip{secs}.mp4"));
+        let secs = secs.to_string();
         let ok = std::process::Command::new(&ffmpeg)
             .args([
                 "-y",
@@ -649,7 +691,7 @@ mod tests {
                 "-i",
                 "sine=frequency=440:sample_rate=44100",
                 "-t",
-                "3",
+                &secs,
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -714,9 +756,10 @@ mod tests {
         let (base, _srv) = clip_server(std::fs::read(&clip).unwrap(), Duration::from_millis(2500));
 
         let exe = super::super::chrome::find(None).unwrap();
-        let ch = super::super::chrome::launch(&exe, &std::env::temp_dir().join("haul-chrome-test"))
-            .await
-            .unwrap();
+        let ch =
+            super::super::chrome::launch(&exe, &std::env::temp_dir().join("haul-chrome-test-ends"))
+                .await
+                .unwrap();
         let cdp = Cdp::connect(&ch.ws_url).await.unwrap();
 
         let webm = dir.join("rec.webm");
@@ -767,9 +810,10 @@ mod tests {
         let (base, _srv) = loop_server(std::fs::read(&clip).unwrap());
 
         let exe = super::super::chrome::find(None).unwrap();
-        let ch = super::super::chrome::launch(&exe, &std::env::temp_dir().join("haul-chrome-test"))
-            .await
-            .unwrap();
+        let ch =
+            super::super::chrome::launch(&exe, &std::env::temp_dir().join("haul-chrome-test-stop"))
+                .await
+                .unwrap();
         let cdp = Cdp::connect(&ch.ws_url).await.unwrap();
 
         let webm = dir.join("rec.webm");
@@ -800,6 +844,85 @@ mod tests {
             "上限 1 小時，卻等了 {elapsed:?}，訊號沒生效"
         );
         assert!(out.bytes > 10_240);
+    }
+
+    /// 自動接播下一首：第一支播完立刻換成循環播放的第二支，中間沒有靜音。
+    /// 這正是 Suno 換歌的樣子——只靠「安靜 5 秒」的話會一路錄到上限。
+    #[tokio::test]
+    async fn stops_when_the_first_media_ends_even_if_the_page_plays_on() {
+        if std::env::var("HAUL_TEST_CHROME").is_err() {
+            eprintln!("略過：未設 HAUL_TEST_CHROME");
+            return;
+        }
+        let dir = std::env::temp_dir().join("haul-record-next-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let Some(clip) = make_clip_secs(&dir, 6) else {
+            eprintln!("略過：沒有 ffmpeg");
+            return;
+        };
+        let (base, _srv) = next_server(std::fs::read(&clip).unwrap());
+
+        let exe = super::super::chrome::find(None).unwrap();
+        let ch =
+            super::super::chrome::launch(&exe, &std::env::temp_dir().join("haul-chrome-test-next"))
+                .await
+                .unwrap();
+        let cdp = Cdp::connect(&ch.ws_url).await.unwrap();
+
+        let webm = dir.join("rec.webm");
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let t0 = Instant::now();
+        let out = record(
+            &cdp,
+            &format!("{base}/"),
+            false,
+            &webm,
+            Duration::from_secs(60),
+            stop_rx,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        let elapsed = t0.elapsed();
+        let _ = cdp.call(None, "Browser.close", json!({})).await;
+
+        assert_eq!(out.stop, Stop::MediaEnded, "第一支播完就該停");
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "第二支在循環播放，卻等了 {elapsed:?}：沒有在第一支結束時停"
+        );
+        assert!(out.bytes > 10_240);
+    }
+
+    fn next_server(clip: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let page = format!(
+            "<!doctype html><title>Next</title><video autoplay src=\"{base}/clip.mp4\"></video>\
+             <script>const v=document.querySelector('video');\
+             v.addEventListener('ended',()=>{{v.src='{base}/clip.mp4?next';v.loop=true;v.play();}});</script>"
+        );
+        let h = std::thread::spawn(move || {
+            for _ in 0..64 {
+                let Ok((mut s, _)) = l.accept() else { break };
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let (ct, body): (&str, &[u8]) = if req.contains("/clip.mp4") {
+                    ("video/mp4", &clip)
+                } else {
+                    ("text/html", page.as_bytes())
+                };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(body);
+            }
+        });
+        (base, h)
     }
 
     fn loop_server(clip: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
