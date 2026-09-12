@@ -29,7 +29,12 @@ pub struct Entry {
     pub ext: String,
 }
 
-/// 找 gallery-dl：先看 Haul 自己的 bin 目錄，再看 PATH。
+/// 找 gallery-dl：先看 Haul 自己的 bin 目錄，再看 PATH，最後看幾個
+/// PATH 常常沒有的安裝位置。
+///
+/// 最後那層是給 GUI 的：從 Finder 開的 app 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，
+/// 而我們自己建議的 `pipx install gallery-dl` 裝在 `~/.local/bin`——
+/// 使用者照著提示裝了，GUI 卻還是說沒裝（實際發生過）。
 pub fn find(bin_dir: &Path) -> Option<PathBuf> {
     let name = if cfg!(windows) {
         "gallery-dl.exe"
@@ -42,10 +47,35 @@ pub fn find(bin_dir: &Path) -> Option<PathBuf> {
         return Some(own);
     }
 
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
+    search_dirs(
+        std::env::var_os("PATH").as_deref(),
+        Some(crate::engine::home_dir().as_path()),
+    )
+    .into_iter()
+    .map(|d| d.join(name))
+    .find(|p| p.is_file())
+}
+
+/// PATH 裡的目錄，加上 pipx / pip --user / Homebrew 的預設位置。
+/// 順序就是優先順序：PATH 先，使用者自己裝的在系統的前面。
+fn search_dirs(path: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = path
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    if let Some(home) = home {
+        dirs.push(home.join(".local/bin"));
+        // pip install --user 在 macOS 上的落點，版本號不固定
+        if let Ok(rd) = std::fs::read_dir(home.join("Library/Python")) {
+            let mut vers: Vec<PathBuf> = rd.flatten().map(|e| e.path().join("bin")).collect();
+            vers.sort();
+            vers.reverse();
+            dirs.extend(vers);
+        }
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    dirs.dedup();
+    dirs
 }
 
 /// 這個網址 gallery-dl 認不認得。用 --simulate 問，不會下載任何東西。
@@ -65,6 +95,12 @@ pub async fn supported(bin: &Path, url: &str) -> bool {
 }
 
 /// 列出頁面上的圖片網址，不下載。
+///
+/// 用 `--resolve-json` 而不是 `--dump-json`：很多站的「個人頁」本身沒有檔案，
+/// 只排隊一個子萃取器（Instagram 的 `<user>/` → `<user>/posts/`、DeviantArt 的
+/// `<user>` → `<user>/gallery`）。`--dump-json` 到排隊就停，拿到的是空清單；
+/// `--resolve-json` 會跟進去把檔案列出來。`--range` 是對每個子萃取器各算的，
+/// 所以結果還要自己截一次。
 pub async fn list(
     bin: &Path,
     url: &str,
@@ -74,7 +110,7 @@ pub async fn list(
     let limit = limit.clamp(1, MAX_ITEMS);
     let mut cmd = Command::new(bin);
     cmd.kill_on_drop(true);
-    cmd.args(["--dump-json", "--range", &format!("1-{limit}")]);
+    cmd.args(["--resolve-json", "--range", &format!("1-{limit}")]);
     // gallery-dl 要的是檔案不是瀏覽器名稱，所以共用 yt-dlp 匯出的那份
     if let Some(f) = cookie_file {
         cmd.arg("--cookies").arg(f);
@@ -103,16 +139,19 @@ pub async fn list(
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)
         .map_err(|e| anyhow!("看不懂 gallery-dl 的輸出：{e}"))?;
 
-    let entries = parse_dump(&v);
+    let mut entries = parse_dump(&v);
     if entries.is_empty() {
         // 離開碼 0 不代表有東西：頁面可能是空的分類或需要登入
         bail!("這個頁面上沒有找到可下載的圖片");
     }
+    entries.truncate(limit);
     Ok(entries)
 }
 
-/// 解析 --dump-json。每筆是 `[depth, url, metadata]`（檔案）
-/// 或 `[depth, metadata]`（目錄，沒有網址）。
+/// 解析 --resolve-json。每筆的第一欄是 gallery-dl 的訊息型別（2 目錄、
+/// 3 檔案、6 排隊給子萃取器），不是深度：檔案是 `[3, url, metadata]`，
+/// 目錄是 `[2, metadata]` 沒有網址，排隊是 `[6, 頁面網址, metadata]`——
+/// 帶網址但沒有 extension，靠這點與檔案區分。
 fn parse_dump(v: &serde_json::Value) -> Vec<Entry> {
     let Some(rows) = v.as_array() else {
         return Vec::new();
@@ -211,6 +250,59 @@ mod tests {
             [2, 12345, {}]
         ]);
         assert!(parse_dump(&v).is_empty());
+    }
+
+    /// 真實案例：Instagram 個人頁用 --dump-json 只會得到這一筆——排隊給
+    /// 子萃取器的頁面網址。它不是檔案；真正的檔案要 --resolve-json 才會出現。
+    #[test]
+    fn queued_child_extractor_rows_are_not_files() {
+        let v = json!([[
+            6,
+            "https://www.instagram.com/someone/posts/",
+            { "category": "instagram", "subcategory": "user" }
+        ]]);
+        assert!(parse_dump(&v).is_empty());
+    }
+
+    #[test]
+    fn looks_in_user_level_install_dirs_even_when_path_lacks_them() {
+        let home = Path::new("/Users/someone");
+        // GUI 從 Finder 開時的 PATH
+        let path = std::ffi::OsString::from("/usr/bin:/bin:/usr/sbin:/sbin");
+        let dirs = search_dirs(Some(&path), Some(home));
+        assert_eq!(dirs[0], PathBuf::from("/usr/bin"), "PATH 優先");
+        assert!(
+            dirs.contains(&home.join(".local/bin")),
+            "pipx 的落點：{dirs:?}"
+        );
+        assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
+        // 沒有 HOME 也不該 panic
+        assert!(!search_dirs(None, None).is_empty());
+    }
+
+    /// 真實網路：個人頁只排隊子萃取器，--dump-json 會拿到空清單，
+    /// --resolve-json 才列得出檔案。要有 gallery-dl 與網路才跑。
+    #[tokio::test]
+    async fn resolves_child_extractors_of_a_profile_page() {
+        if std::env::var("HAUL_TEST_NET").is_err() {
+            eprintln!("略過：未設 HAUL_TEST_NET");
+            return;
+        }
+        let Some(bin) = find(Path::new("/nonexistent")) else {
+            eprintln!("略過：沒有 gallery-dl");
+            return;
+        };
+        let got = list(&bin, "https://www.deviantart.com/spyed", 3, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            got.len(),
+            3,
+            "--range 是對子萃取器算的，結果要截到 limit：{got:?}"
+        );
+        assert!(got
+            .iter()
+            .all(|e| e.url.starts_with("http") && !e.ext.is_empty()));
     }
 
     #[test]

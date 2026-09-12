@@ -1016,7 +1016,14 @@ impl Engine {
                                         .collect(),
                                 })
                             }
-                            Err(e) => Err(anyhow::anyhow!("{yt_err}\n（網頁圖片：{e}）")),
+                            // 圖庫萃取器那層的結果也要留著：使用者裝了 gallery-dl
+                            // 卻只看到「網頁圖片太小」，會以為它沒被用到
+                            Err(e) => {
+                                let mut lines = vec![yt_err.to_string()];
+                                lines.extend(gallery_hint);
+                                lines.push(format!("（網頁圖片：{e}）"));
+                                Err(anyhow::anyhow!("{}", lines.join("\n")))
+                            }
                         }
                     }
                     // 有站點規則的主機，規則自己的失敗原因才是答案（例如 Suno
