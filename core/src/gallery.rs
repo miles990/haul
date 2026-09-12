@@ -142,11 +142,39 @@ pub async fn list(
 
     let mut entries = parse_dump(&v);
     if entries.is_empty() {
-        // 離開碼 0 不代表有東西：頁面可能是空的分類或需要登入
+        // 離開碼 0 不代表有東西：--resolve-json 把子萃取器的錯誤寫成
+        // `[-1, {error, message}]` 列然後正常結束（實測 Instagram 被限流時
+        // 就是這樣），所以原因要從輸出裡撈；沒有錯誤列才是真的空
+        if let Some(msg) = dump_errors(&v).into_iter().next() {
+            bail!("{msg}");
+        }
         bail!("這個頁面上沒有找到可下載的圖片");
     }
     entries.truncate(limit);
     Ok(entries)
+}
+
+/// --resolve-json 裡的錯誤列：`[-1, { "error": 類型, "message": 說明 }]`
+fn dump_errors(v: &serde_json::Value) -> Vec<String> {
+    let Some(rows) = v.as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let row = row.as_array()?;
+            if row.first()?.as_i64()? != -1 {
+                return None;
+            }
+            let meta = row.get(1)?.as_object()?;
+            let msg = meta.get("message").and_then(|m| m.as_str());
+            let kind = meta.get("error").and_then(|e| e.as_str());
+            match (msg, kind) {
+                (Some(m), _) if !m.trim().is_empty() => Some(m.to_string()),
+                (_, Some(k)) => Some(k.to_string()),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// 解析 --resolve-json。每筆的第一欄是 gallery-dl 的訊息型別（2 目錄、
@@ -312,6 +340,24 @@ mod tests {
         assert!(is_unsupported(&e));
         assert_eq!(e.to_string(), "gallery-dl 不支援這個網址");
         assert!(!is_unsupported(&anyhow!("HTTP redirect to home page")));
+    }
+
+    /// 真實輸出：Instagram 被限流時 --resolve-json 離開碼 0，錯誤寫在這一列
+    #[test]
+    fn error_rows_carry_the_real_reason() {
+        let v = json!([[
+            -1,
+            { "error": "AbortExtraction", "message": "HTTP redirect to home page (https://www.instagram.com/)" }
+        ]]);
+        assert!(parse_dump(&v).is_empty(), "錯誤列不是檔案");
+        assert_eq!(
+            dump_errors(&v),
+            vec!["HTTP redirect to home page (https://www.instagram.com/)"]
+        );
+        // 沒有 message 就退回錯誤類型；一般列不算錯誤
+        let v = json!([[-1, { "error": "NotFoundError" }], [2, { "category": "x" }]]);
+        assert_eq!(dump_errors(&v), vec!["NotFoundError"]);
+        assert!(dump_errors(&json!([])).is_empty());
     }
 
     #[test]

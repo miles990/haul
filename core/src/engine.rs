@@ -1041,11 +1041,12 @@ impl Engine {
                                         .collect(),
                                 })
                             }
-                            // 圖庫萃取器那層的結果也要留著：使用者裝了 gallery-dl
-                            // 卻只看到「網頁圖片太小」，會以為它沒被用到
+                            // 圖庫萃取器那層的結果也要留著，而且排最前面：圖片模式
+                            // 它是主路徑，它的原因（要登入、被限流）比 yt-dlp 的
+                            // 「請回報 issue」有用得多
                             Err(e) => {
-                                let mut lines = vec![yt_err.to_string()];
-                                lines.extend(gallery_hint);
+                                let mut lines: Vec<String> = gallery_hint.into_iter().collect();
+                                lines.push(yt_err.to_string());
                                 lines.push(format!("（網頁圖片：{e}）"));
                                 Err(anyhow::anyhow!("{}", lines.join("\n")))
                             }
