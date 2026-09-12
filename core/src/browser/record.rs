@@ -6,7 +6,7 @@
 //! 分頁，只有自己擷取自己是零互動的。代價：分頁換頁會殺掉錄製器，所以監聽
 //! pagehide 先停下來，已收到的 chunk 照收尾。
 
-use super::cdp::Cdp;
+use super::cdp::{Cdp, CdpEvent};
 use anyhow::{anyhow, bail, Result};
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -115,6 +115,9 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
 const RECORD_JS: &str = r#"(async () => {
   const send = o => { try { window.haulRec(JSON.stringify(o)); } catch (_) {} };
   try {
+    if (!navigator.mediaDevices) {
+      throw new Error('這個頁面不是安全內容（' + location.href + '），瀏覽器不開放擷取');
+    }
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: 30 }, audio: true, preferCurrentTab: true,
     });
@@ -242,8 +245,29 @@ pub struct Recorded {
     pub title: String,
 }
 
-/// 目標分頁載入後等多久再注入。不等完全載完 —— 直播頁永遠載不完。
+/// 主框架導航 commit 後等多久再注入。不等完全載完 —— 直播頁永遠載不完。
 const SETTLE: Duration = Duration::from_millis(1500);
+
+/// 等導航 commit 的上限。實測 Suno 的 SSR 頁在冷啟動的 Chrome 裡要兩秒以上
+/// 才 commit；在那之前分頁還是 about:blank，不是 secure context，注入的腳本
+/// 會因為沒有 `navigator.mediaDevices` 而死得莫名其妙。
+const NAV_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// 這個事件是不是「這個分頁的主框架已經導航到真正的網址」。
+/// 子框架（parentId）與 about:blank 都不算。
+fn main_frame_committed(ev: &CdpEvent, sid: &str) -> Option<String> {
+    if ev.method != "Page.frameNavigated" || ev.session_id.as_deref() != Some(sid) {
+        return None;
+    }
+    let frame = &ev.params["frame"];
+    if frame.get("parentId").and_then(|v| v.as_str()).is_some() {
+        return None;
+    }
+    frame["url"]
+        .as_str()
+        .filter(|u| !u.is_empty() && *u != "about:blank")
+        .map(str::to_string)
+}
 
 /// 開目標分頁、在裡面錄到某個停止條件成立。chunk 邊收邊寫進 `dest`。
 ///
@@ -260,7 +284,9 @@ pub async fn record(
 ) -> Result<Recorded> {
     let mut events = cdp.subscribe();
 
-    let (target_id, sid) = open(cdp, url).await?;
+    // 先開空白頁、訂好事件，再自己導航：否則快的頁面會在訂閱前就 commit，
+    // 慢的頁面會在 commit 前就被注入（見 NAV_TIMEOUT）。
+    let (target_id, sid) = open(cdp).await?;
     cdp.call(Some(&sid), "Page.enable", json!({})).await?;
     cdp.call(Some(&sid), "Runtime.enable", json!({})).await?;
     cdp.call(
@@ -269,6 +295,31 @@ pub async fn record(
         json!({ "name": "haulRec" }),
     )
     .await?;
+    cdp.call(Some(&sid), "Page.navigate", json!({ "url": url }))
+        .await?;
+
+    let deadline = Instant::now() + NAV_TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("頁面 {} 秒內沒有載入（{url}）", NAV_TIMEOUT.as_secs());
+        }
+        tokio::select! {
+            r = tokio::time::timeout(left, events.recv()) => match r {
+                Ok(Ok(ev)) => {
+                    if main_frame_committed(&ev, &sid).is_some() {
+                        break;
+                    }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(_)) => bail!("瀏覽器連線已關閉"),
+                Err(_) => continue,
+            },
+            _ = stop.changed() => {
+                if *stop.borrow() { bail!("錄製在頁面載入前就停止了"); }
+            }
+        }
+    }
     tokio::time::sleep(SETTLE).await;
 
     let title = eval_str(cdp, &sid, "document.title")
@@ -396,9 +447,9 @@ pub async fn record(
     })
 }
 
-async fn open(cdp: &Cdp, url: &str) -> Result<(String, String)> {
+async fn open(cdp: &Cdp) -> Result<(String, String)> {
     let t = cdp
-        .call(None, "Target.createTarget", json!({ "url": url }))
+        .call(None, "Target.createTarget", json!({ "url": "about:blank" }))
         .await?;
     let tid = t["targetId"]
         .as_str()
@@ -520,6 +571,37 @@ mod tests {
     }
 
     #[test]
+    fn only_main_frame_real_navigation_counts_as_committed() {
+        let ev = |method: &str, sid: Option<&str>, params: Value| CdpEvent {
+            method: method.into(),
+            params,
+            session_id: sid.map(String::from),
+        };
+        let real = json!({ "frame": { "id": "F1", "url": "https://suno.com/song/x" } });
+        assert_eq!(
+            main_frame_committed(&ev("Page.frameNavigated", Some("s1"), real.clone()), "s1")
+                .as_deref(),
+            Some("https://suno.com/song/x")
+        );
+        // 別的分頁
+        assert!(
+            main_frame_committed(&ev("Page.frameNavigated", Some("s2"), real.clone()), "s1")
+                .is_none()
+        );
+        // 還在 about:blank 不算——那正是這個等待要避開的狀態
+        let blank = json!({ "frame": { "id": "F1", "url": "about:blank" } });
+        assert!(
+            main_frame_committed(&ev("Page.frameNavigated", Some("s1"), blank), "s1").is_none()
+        );
+        // 子框架（廣告、播放器 iframe）不算
+        let sub =
+            json!({ "frame": { "id": "F2", "parentId": "F1", "url": "https://ads.example/" } });
+        assert!(main_frame_committed(&ev("Page.frameNavigated", Some("s1"), sub), "s1").is_none());
+        // 其他事件不算
+        assert!(main_frame_committed(&ev("Page.loadEventFired", Some("s1"), real), "s1").is_none());
+    }
+
+    #[test]
     fn record_js_substitutes_placeholders() {
         let js = record_js("video/webm;codecs=h264,opus", true);
         assert!(js.contains("mimeType: 'video/webm;codecs=h264,opus'"));
@@ -584,7 +666,9 @@ mod tests {
     }
 
     /// 一頁自動播放的 <video>。127.0.0.1 是 secure context，getDisplayMedia 可用。
-    fn clip_server(clip: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+    /// 頁面延遲 `delay` 才回：重現「導航還沒 commit 就注入」的失敗。
+    /// 本機伺服器是瞬間回的，沒有這個延遲測不到那個 bug。
+    fn clip_server(clip: Vec<u8>, delay: Duration) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
@@ -600,6 +684,7 @@ mod tests {
                 let (ct, body): (&str, &[u8]) = if req.contains("/clip.mp4") {
                     ("video/mp4", &clip)
                 } else {
+                    std::thread::sleep(delay);
                     ("text/html", page.as_bytes())
                 };
                 let _ = write!(
@@ -625,7 +710,8 @@ mod tests {
             eprintln!("略過：沒有 ffmpeg");
             return;
         };
-        let (base, _srv) = clip_server(std::fs::read(&clip).unwrap());
+        // 頁面比 SETTLE 慢才回：舊版在 about:blank 上注入就會死在 getDisplayMedia
+        let (base, _srv) = clip_server(std::fs::read(&clip).unwrap(), Duration::from_millis(2500));
 
         let exe = super::super::chrome::find(None).unwrap();
         let ch = super::super::chrome::launch(&exe, &std::env::temp_dir().join("haul-chrome-test"))
