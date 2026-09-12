@@ -78,20 +78,21 @@ fn search_dirs(path: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Vec<PathB
     dirs
 }
 
-/// 這個網址 gallery-dl 認不認得。用 --simulate 問，不會下載任何東西。
-pub async fn supported(bin: &Path, url: &str) -> bool {
-    match Command::new(bin)
-        .kill_on_drop(true)
-        .args(["--simulate", "--range", "1-1", url])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-    {
-        Ok(s) => s.code() != Some(EXIT_UNSUPPORTED),
-        Err(_) => false,
+/// gallery-dl 不認得這個網址（離開碼 64）。用型別而不是字串，呼叫端才能
+/// 把「不支援、安靜地換下一條路」與「支援但失敗、原因要給使用者看」分開。
+#[derive(Debug)]
+pub struct Unsupported;
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("gallery-dl 不支援這個網址")
     }
+}
+
+impl std::error::Error for Unsupported {}
+
+pub fn is_unsupported(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Unsupported>().is_some()
 }
 
 /// 列出頁面上的圖片網址，不下載。
@@ -123,7 +124,7 @@ pub async fn list(
         .map_err(|e| anyhow!("執行 gallery-dl 失敗：{e}"))?;
 
     if out.status.code() == Some(EXIT_UNSUPPORTED) {
-        bail!("gallery-dl 不支援這個網址");
+        return Err(anyhow::Error::new(Unsupported));
     }
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stderr);
@@ -303,6 +304,14 @@ mod tests {
         assert!(got
             .iter()
             .all(|e| e.url.starts_with("http") && !e.ext.is_empty()));
+    }
+
+    #[test]
+    fn unsupported_is_distinguishable_from_other_failures() {
+        let e = anyhow::Error::new(Unsupported);
+        assert!(is_unsupported(&e));
+        assert_eq!(e.to_string(), "gallery-dl 不支援這個網址");
+        assert!(!is_unsupported(&anyhow!("HTTP redirect to home page")));
     }
 
     #[test]

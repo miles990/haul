@@ -200,6 +200,14 @@ enum Resolution {
     },
 }
 
+/// 圖庫萃取器的結果
+enum Gallery {
+    Resolved(Resolution),
+    /// 沒解析出來。Some 是要附在錯誤訊息裡的說明（失敗原因或安裝提示），
+    /// None 是它不認得這個網址、沒什麼好說的
+    Hint(Option<String>),
+}
+
 /// 歷史最多保留幾筆，避免無限成長
 const HISTORY_CAP: usize = 500;
 
@@ -890,6 +898,46 @@ impl Engine {
         jobs
     }
 
+    /// 問圖庫萃取器。三種結果：解析成功；它認得但失敗（原因要進錯誤訊息）；
+    /// 不認得或沒裝（沒裝就給安裝提示）。
+    async fn try_gallery(&self, input: &str, cookie_file: Option<&Path>) -> Gallery {
+        let Some(bin) = gallery::find(&self.cfg.bin_dir) else {
+            // 沒裝就明說要裝什麼，而不是讓使用者對著「不支援」猜
+            return Gallery::Hint(Some(
+                "若這是圖庫或漫畫頁，安裝 gallery-dl 後可支援：pipx install gallery-dl".into(),
+            ));
+        };
+        match gallery::list(&bin, input, gallery::MAX_ITEMS, cookie_file).await {
+            Ok(entries) => {
+                let sub = sanitize(&short(input));
+                self.log.info(
+                    "gallery.expanded",
+                    serde_json::json!({ "input": cookies::redact(input), "items": entries.len() }),
+                );
+                Gallery::Resolved(Resolution::Playlist {
+                    title: sub.clone(),
+                    items: entries
+                        .into_iter()
+                        .map(|e| {
+                            let label = e.title.clone();
+                            (
+                                Job::Direct {
+                                    media: e.url,
+                                    title: e.title,
+                                    content_type: None,
+                                    subdir: Some(sub.clone()),
+                                },
+                                label,
+                            )
+                        })
+                        .collect(),
+                })
+            }
+            Err(e) if gallery::is_unsupported(&e) => Gallery::Hint(None),
+            Err(e) => Gallery::Hint(Some(format!("（圖庫萃取器：{e}）"))),
+        }
+    }
+
     /// 決定一個輸入該怎麼抓
     async fn resolve(&self, tools: &Tools, input: &str, mode: Mode) -> Result<Resolution> {
         // 先備妥 cookie 檔，gallery-dl 與直接抓取都要用
@@ -912,6 +960,17 @@ impl Engine {
             });
         }
 
+        // 圖片模式先問圖庫萃取器：yt-dlp 在這個模式下只會抓「影片的封面」，
+        // 對圖庫頁它會拿一張 og:image 就宣告成功（實測 DeviantArt 個人頁
+        // 182 張只拿到 1 張），gallery-dl 根本沒輪到。它不認得或失敗才回到 yt-dlp。
+        let mut gallery_hint = None;
+        if mode == Mode::Image {
+            match self.try_gallery(input, cookie_file).await {
+                Gallery::Resolved(r) => return Ok(r),
+                Gallery::Hint(h) => gallery_hint = h,
+            }
+        }
+
         match extract::probe(tools, input, self.browser().as_deref()).await {
             Ok(Probe::Single { title }) => Ok(Resolution::Single {
                 job: Job::Ytdlp {
@@ -932,46 +991,12 @@ impl Engine {
             // yt-dlp 對某些站是政策性拒絕（例如 suno.com），不是還沒實作。
             // 這種情況才輪到圖庫萃取器與直接抓取。
             Err(yt_err) => {
-                let mut gallery_hint = None;
-                match gallery::find(&self.cfg.bin_dir) {
-                    Some(bin) if gallery::supported(&bin, input).await => {
-                        match gallery::list(&bin, input, gallery::MAX_ITEMS, cookie_file).await {
-                            Ok(entries) => {
-                                let sub = sanitize(&short(input));
-                                self.log.info(
-                                    "gallery.expanded",
-                                    serde_json::json!({ "input": cookies::redact(input), "items": entries.len() }),
-                                );
-                                return Ok(Resolution::Playlist {
-                                    title: sub.clone(),
-                                    items: entries
-                                        .into_iter()
-                                        .map(|e| {
-                                            let label = e.title.clone();
-                                            (
-                                                Job::Direct {
-                                                    media: e.url,
-                                                    title: e.title,
-                                                    content_type: None,
-                                                    subdir: Some(sub.clone()),
-                                                },
-                                                label,
-                                            )
-                                        })
-                                        .collect(),
-                                });
-                            }
-                            Err(e) => gallery_hint = Some(format!("（圖庫萃取器：{e}）")),
-                        }
+                // 圖片模式在前面已經問過了
+                if mode != Mode::Image {
+                    match self.try_gallery(input, cookie_file).await {
+                        Gallery::Resolved(r) => return Ok(r),
+                        Gallery::Hint(h) => gallery_hint = h,
                     }
-                    // 沒裝就明說要裝什麼，而不是讓使用者對著「不支援」猜
-                    None => {
-                        gallery_hint = Some(
-                            "若這是圖庫或漫畫頁，安裝 gallery-dl 後可支援：pipx install gallery-dl"
-                                .to_string(),
-                        )
-                    }
-                    _ => {}
                 }
                 match direct::probe(&self.client, input, self.cfg.allow_html).await {
                     Ok(found) => Ok(Resolution::Single {
@@ -2521,6 +2546,42 @@ mod tests {
         assert!(!ytdlp_running(), "移除後 yt-dlp 應該被收掉");
         assert!(eng.snapshot().is_empty());
         assert!(load_history(&eng.history, 500).is_empty());
+    }
+
+    /// 圖片模式對圖庫類的頁面要先走 gallery-dl：yt-dlp 的 generic extractor
+    /// 會先抓到一張封面就宣告成功。需要網路與 gallery-dl。
+    #[tokio::test]
+    async fn image_mode_prefers_gallery_extractor_over_ytdlp_thumbnail() {
+        if std::env::var("HAUL_TEST_NET").is_err() {
+            return;
+        }
+        if gallery::find(&default_bin_dir()).is_none() {
+            eprintln!("略過：沒有 gallery-dl");
+            return;
+        }
+        let eng = fresh_engine("net-gallery-first");
+        let tools = eng.tools().await.unwrap();
+        let r = eng
+            .resolve(&tools, "https://www.deviantart.com/spyed", Mode::Image)
+            .await
+            .unwrap();
+        match r {
+            Resolution::Playlist { items, .. } => {
+                assert!(
+                    items.len() > 1,
+                    "只解析出 {} 項：gallery-dl 沒被優先用到",
+                    items.len()
+                );
+                assert!(items.iter().all(|(j, _)| matches!(
+                    j,
+                    Job::Direct {
+                        subdir: Some(_),
+                        ..
+                    }
+                )));
+            }
+            Resolution::Single { .. } => panic!("圖庫頁被當成單一影片的封面"),
+        }
     }
 
     #[test]
