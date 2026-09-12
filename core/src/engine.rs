@@ -768,8 +768,10 @@ impl Engine {
             Err(e) => {
                 let msg = e.to_string();
                 let eligible = browser_eligible(&msg);
-                // 萃取失敗兩條路都開：瀏覽器可能攔得到，攔不到還能錄
-                self.fail_ex(id, msg, eligible, eligible);
+                // 萃取失敗兩條路都開：瀏覽器可能攔得到，攔不到還能錄。
+                // 站點只給加密串流時，瀏覽器攔到的也是加密的，只剩錄製走得通。
+                let can_record = eligible || msg.contains("加密串流");
+                self.fail_ex(id, msg, eligible, can_record);
                 if eligible && self.cfg.browser_fallback {
                     let me = self.clone();
                     return vec![
@@ -1017,6 +1019,9 @@ impl Engine {
                             Err(e) => Err(anyhow::anyhow!("{yt_err}\n（網頁圖片：{e}）")),
                         }
                     }
+                    // 有站點規則的主機，規則自己的失敗原因才是答案（例如 Suno
+                    // 只給加密串流）；yt-dlp 對它本來就是政策性拒絕，沒有資訊量。
+                    Err(probe_err) if direct::has_rule(input) => Err(probe_err),
                     // 沒有直接規則時，該讓使用者看到的是 yt-dlp 的原因。
                     // 但如果它其實是一般網頁，使用者要的多半是頁上的圖——
                     // 那條路只在圖片模式走，講清楚免得對著「不支援」猜。

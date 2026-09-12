@@ -176,44 +176,150 @@ async fn head_ok(client: &Client, url: &str) -> bool {
     false
 }
 
-/// Suno 的歌曲頁。曾經是 `<uuid>.mp3`，現在是 `<uuid>.mp4`（h264 + aac），
-/// 所以兩個都試，不押寶在單一副檔名上。
+/// Suno 歌曲頁上與這首歌有關的媒體網址。
+#[derive(Debug, Default, PartialEq)]
+struct SunoPage {
+    /// 頁面明寫的明碼檔案（`video_url` / `audio_url` / 沒標 encoding 的 media_urls）
+    plain: Vec<String>,
+    /// 只給了加密串流時，它的 `encoding` 版本
+    encrypted: Option<String>,
+}
+
+/// 從 Suno 的頁面 HTML 讀出這首歌的媒體網址。
+///
+/// 資料在 Next.js 的 RSC payload 裡，是「JSON 字串化再嵌進 JS」的形式，
+/// 引號都跳脫成 `\"`。這裡不動 JSON parser，先把跳脫拆掉再用正規表示式
+/// 抓欄位 —— 只認得含這首歌 id 的網址，頁面上「相關歌曲」的欄位才不會被
+/// 誤認成這首。
+fn suno_page(html: &str, id: &str) -> SunoPage {
+    static FIELD: OnceLock<Regex> = OnceLock::new();
+    static MEDIA_LIST: OnceLock<Regex> = OnceLock::new();
+    static MEDIA_ITEM: OnceLock<Regex> = OnceLock::new();
+    static MEDIA_URL: OnceLock<Regex> = OnceLock::new();
+    static MEDIA_ENC: OnceLock<Regex> = OnceLock::new();
+    let field =
+        FIELD.get_or_init(|| Regex::new(r#""(?:video_url|audio_url)"\s*:\s*"([^"]*)""#).unwrap());
+    let media_list =
+        MEDIA_LIST.get_or_init(|| Regex::new(r#"(?s)"media_urls"\s*:\s*\[(.*?)\]"#).unwrap());
+    let media_item = MEDIA_ITEM.get_or_init(|| Regex::new(r"\{[^{}]*\}").unwrap());
+    let media_url = MEDIA_URL.get_or_init(|| Regex::new(r#""url"\s*:\s*"([^"]*)""#).unwrap());
+    let media_enc = MEDIA_ENC.get_or_init(|| Regex::new(r#""encoding"\s*:\s*"([^"]*)""#).unwrap());
+
+    let text = html.replace("\\\"", "\"");
+    let id = id.to_ascii_lowercase();
+    let is_mine = |u: &str| u.starts_with("http") && u.to_ascii_lowercase().contains(&id);
+    let mut page = SunoPage::default();
+    let push = |page: &mut SunoPage, url: String| {
+        if !page.plain.contains(&url) {
+            page.plain.push(url);
+        }
+    };
+
+    for c in field.captures_iter(&text) {
+        let url = &c[1];
+        // audio_url 現在一律是 studio-api 的 /api/forbidden，不是檔案
+        if is_mine(url) && !url.contains("/api/forbidden") {
+            push(&mut page, url.to_string());
+        }
+    }
+    for list in media_list.captures_iter(&text) {
+        for item in media_item.find_iter(&list[1]) {
+            let item = item.as_str();
+            let Some(url) = media_url.captures(item).map(|c| c[1].to_string()) else {
+                continue;
+            };
+            if !is_mine(&url) {
+                continue;
+            }
+            let enc = media_enc
+                .captures(item)
+                .map(|c| c[1].to_string())
+                .filter(|e| !e.is_empty());
+            match enc {
+                Some(enc) => {
+                    page.encrypted.get_or_insert(enc);
+                }
+                None => push(&mut page, url),
+            }
+        }
+    }
+    page
+}
+
+/// Suno 的歌曲頁。
+///
+/// 2026-09 實測：頁面的 `audio_url` 一律變成 `/api/forbidden`；`media_urls`
+/// 只給 `encoding: "1.0.0"` 的位元組流，熵 7.9999、沒有任何容器結構，播放器
+/// 在瀏覽器端解密後才播 —— 那是刻意的保護措施，haul 不解。還拿得到明碼檔的
+/// 只剩 `video_url`，有影片的歌才有；舊的 `cdn1.suno.ai/<id>.mp4` 就是它，
+/// 所以之前的猜路徑其實只對有影片的歌有效。
+///
+/// 現在先讀頁面上寫了什麼，讀不到才退回猜路徑；只剩加密流時把原因講清楚，
+/// 不要讓使用者對著 yt-dlp 的「不支援」猜。
 async fn suno(client: &Client, page_url: &str) -> Result<Found> {
     let id = uuid_re()
         .find(page_url)
         .map(|m| m.as_str().to_lowercase())
         .ok_or_else(|| anyhow::anyhow!("這個 Suno 連結裡沒有歌曲 id"))?;
 
-    let mut media = None;
+    // 標題抓不到不是錯誤，退回用 id 當檔名
+    let html = match client.get(page_url).header("user-agent", UA).send().await {
+        Ok(r) => r.text().await.ok(),
+        Err(_) => None,
+    };
+    let page = html
+        .as_deref()
+        .map(|h| suno_page(h, &id))
+        .unwrap_or_default();
+
+    let mut candidates = page.plain.clone();
     for ext in ["mp4", "mp3"] {
-        let candidate = format!("https://cdn1.suno.ai/{id}.{ext}");
-        if head_ok(client, &candidate).await {
-            media = Some(candidate);
+        let guess = format!("https://cdn1.suno.ai/{id}.{ext}");
+        if !candidates.contains(&guess) {
+            candidates.push(guess);
+        }
+    }
+    let mut media = None;
+    for candidate in &candidates {
+        if head_ok(client, candidate).await {
+            media = Some(candidate.clone());
             break;
         }
     }
-    let media = media.ok_or_else(|| {
-        anyhow::anyhow!("Suno 的 CDN 上找不到這首（可能是私人的，或路徑規則又改了）")
-    })?;
-
-    // 標題抓不到不是錯誤，退回用 id 當檔名
-    let title = match client.get(page_url).header("user-agent", UA).send().await {
-        Ok(r) => match r.text().await {
-            Ok(html) => og_title_re()
-                .iter()
-                .find_map(|re| re.captures(&html).map(|c| decode_entities(&c[1])))
-                .filter(|t| !t.trim().is_empty())
-                .unwrap_or_else(|| id.clone()),
-            Err(_) => id.clone(),
-        },
-        Err(_) => id.clone(),
+    let media = match (media, page.encrypted) {
+        (Some(m), _) => m,
+        (None, Some(enc)) => bail!(
+            "Suno 這首只提供加密串流（encoding {enc}），haul 不解密。\n\
+             要存下來請用 `haul record` 在播放時錄製；若是你自己的歌，Suno 網站的 Download 才有原檔"
+        ),
+        (None, None) => bail!("Suno 的 CDN 上找不到這首（可能是私人的，或路徑規則又改了）"),
     };
+
+    let title = html
+        .as_deref()
+        .and_then(|h| {
+            og_title_re()
+                .iter()
+                .find_map(|re| re.captures(h).map(|c| decode_entities(&c[1])))
+        })
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| id.clone());
 
     Ok(Found {
         media,
         title,
         content_type: None,
     })
+}
+
+/// 這個主機有沒有站點專用規則。有的話，規則自己的失敗原因比 yt-dlp
+/// 的政策性拒絕有用得多，呼叫端據此決定要回報哪個。
+pub fn has_rule(url: &str) -> bool {
+    let host = host_of(url);
+    let host = host.split(':').next().unwrap_or(&host);
+    ["suno.com", "suno.ai"]
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
 /// 試著在不靠 yt-dlp 的情況下找出媒體檔。找不到就回 Err，呼叫端據此
@@ -236,14 +342,7 @@ pub async fn probe(client: &Client, url: &str, allow_html: bool) -> Result<Found
         });
     }
 
-    let host = url
-        .split("://")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    if host.ends_with("suno.com") || host.ends_with("suno.ai") {
+    if has_rule(url) {
         return suno(client, url).await;
     }
 
@@ -505,6 +604,63 @@ mod tests {
         assert!(!looks_like_file_url(
             "https://commons.wikimedia.org/wiki/Category:Cats"
         ));
+    }
+
+    // 取自 2026-09 的真實頁面：Next.js RSC payload，引號都跳脫成 \"
+    const SUNO_NEW: &str = r#"self.__next_f.push([1,"...,\"id\":\"bbda3a29-5904-4f58-9488-cbb443c9bc2c\",\"entity_type\":\"song_schema\",\"video_url\":\"\",\"audio_url\":\"https://studio-api.prod.suno.com/api/forbidden\",\"media_urls\":[{\"url\":\"https://d2lwuy8qc234o3.cloudfront.net/1/clip/bbda3a29-5904-4f58-9488-cbb443c9bc2c.m4a\",\"content_type\":\"m4a-opus\",\"delivery\":\"progressive\",\"encoding\":\"1.0.0\"}],\"image_url\":\"https://cdn2.suno.ai/x.jpeg\""])"#;
+    const SUNO_OLD: &str = r#"\"id\":\"f2ca803a-4663-4250-b064-0413469a132e\",\"video_url\":\"https://cdn1.suno.ai/f2ca803a-4663-4250-b064-0413469a132e.mp4\",\"audio_url\":\"https://studio-api.prod.suno.com/api/forbidden\",\"media_urls\":[{\"url\":\"https://d2lwuy8qc234o3.cloudfront.net/1/clip/f2ca803a-4663-4250-b064-0413469a132e.m4a\",\"content_type\":\"m4a-opus\",\"delivery\":\"progressive\",\"encoding\":\"1.0.0\"}]"#;
+
+    #[test]
+    fn suno_new_song_only_has_encrypted_stream() {
+        let page = suno_page(SUNO_NEW, "bbda3a29-5904-4f58-9488-cbb443c9bc2c");
+        assert!(page.plain.is_empty(), "{:?}", page.plain);
+        assert_eq!(page.encrypted.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn suno_song_with_video_exposes_plain_mp4() {
+        let page = suno_page(SUNO_OLD, "F2CA803A-4663-4250-B064-0413469A132E");
+        assert_eq!(
+            page.plain,
+            vec!["https://cdn1.suno.ai/f2ca803a-4663-4250-b064-0413469a132e.mp4"]
+        );
+        // 加密流仍然被記下來，但明碼檔優先
+        assert_eq!(page.encrypted.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn suno_ignores_other_songs_on_the_page() {
+        // 同一頁上「相關歌曲」的欄位屬於別的 id，抓錯歌比抓不到更糟
+        let html = format!("{SUNO_NEW}{SUNO_OLD}");
+        let page = suno_page(&html, "bbda3a29-5904-4f58-9488-cbb443c9bc2c");
+        assert!(page.plain.is_empty(), "{:?}", page.plain);
+    }
+
+    #[test]
+    fn suno_media_urls_without_encoding_count_as_plain() {
+        let html = r#"\"media_urls\":[{\"url\":\"https://x.suno.ai/abc12345-0000-0000-0000-000000000000.m4a\",\"content_type\":\"m4a\"}]"#;
+        let page = suno_page(html, "abc12345-0000-0000-0000-000000000000");
+        assert_eq!(
+            page.plain,
+            vec!["https://x.suno.ai/abc12345-0000-0000-0000-000000000000.m4a"]
+        );
+        assert_eq!(page.encrypted, None);
+    }
+
+    #[test]
+    fn suno_parses_unescaped_json_too() {
+        let html =
+            r#"{"video_url":"https://cdn1.suno.ai/abc12345-0000-0000-0000-000000000000.mp4"}"#;
+        let page = suno_page(html, "abc12345-0000-0000-0000-000000000000");
+        assert_eq!(page.plain.len(), 1);
+    }
+
+    #[test]
+    fn site_rules_are_host_scoped() {
+        assert!(has_rule("https://suno.com/song/x"));
+        assert!(has_rule("https://www.suno.ai/song/x"));
+        assert!(!has_rule("https://notsuno.com/song/x"));
+        assert!(!has_rule("https://example.com/suno.com"));
     }
 
     #[test]
