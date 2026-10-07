@@ -1330,6 +1330,13 @@ impl Engine {
                                     "驗證未通過：檔案裡沒有音軌（symphonia：{sym_err}）"
                                 ))
                             }
+                            // 無聲影片同理：音軌解得開，只是安靜，畫面才是重點
+                            Ok(verify::Audio::Silent(_)) if mode == Mode::Video => reported,
+                            Ok(verify::Audio::Silent(db)) => {
+                                return Err(format!(
+                                    "驗證未通過：整首無聲（mean_volume {db:.1} dB）（symphonia：{sym_err}）"
+                                ))
+                            }
                             Err(ff_err) => {
                                 return Err(format!("驗證未通過：{ff_err}（symphonia：{sym_err}）"))
                             }

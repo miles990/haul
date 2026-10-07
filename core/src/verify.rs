@@ -167,13 +167,15 @@ fn parse_mean_volume(stderr: &str) -> Option<f64> {
 ///
 /// 「沒有音軌」與「音軌壞了」必須分開：影片可以沒有聲音（Facebook 的
 /// 無聲 reel 就是真實案例），但有聲音就一定要解得開。要不要接受
-/// `Absent` 由呼叫端依模式決定——只要聲音的模式沒有音軌就是失敗。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// `Absent`／`Silent` 由呼叫端依模式決定——只要聲音的模式就是失敗。
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Audio {
     /// 有音軌，解得開，而且不是整首無聲
     Decoded,
     /// ffmpeg 在容器裡找不到音軌
     Absent,
+    /// 音軌解得開，但整首是數位靜音（mean_volume 低於門檻）
+    Silent(f64),
 }
 
 /// symphonia 不認識的編碼交給 ffmpeg 裁決。
@@ -213,7 +215,7 @@ pub async fn verify_audio_with_ffmpeg(ffmpeg: &Path, file: &Path) -> Result<Audi
     }
 
     match parse_mean_volume(&msg) {
-        Some(db) if db < SILENCE_DB => bail!("整首無聲（mean_volume {db:.1} dB）"),
+        Some(db) if db < SILENCE_DB => Ok(Audio::Silent(db)),
         // 取不到就不判定 —— 寧可漏一個無聲檔，也不要誤殺好檔
         _ => Ok(Audio::Decoded),
     }
@@ -631,6 +633,11 @@ mod tests {
 
     /// 用 lavfi 合成一支兩秒的小影片，可選要不要帶音軌
     fn synth_video(ffmpeg: &Path, name: &str, with_audio: bool) -> std::path::PathBuf {
+        synth_video_with(ffmpeg, name, with_audio.then_some("sine=frequency=440:duration=2"))
+    }
+
+    fn synth_video_with(ffmpeg: &Path, name: &str, audio: Option<&str>) -> std::path::PathBuf {
+        let with_audio = audio.is_some();
         let dir = std::env::temp_dir().join("haul-verify-test");
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join(name);
@@ -638,7 +645,7 @@ mod tests {
         cmd.args(["-v", "error", "-y", "-f", "lavfi", "-i"])
             .arg("testsrc=duration=2:size=64x64:rate=10");
         if with_audio {
-            cmd.args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"]);
+            cmd.args(["-f", "lavfi", "-i"]).arg(audio.unwrap());
         }
         // 內建編碼器，不倚賴 ffmpeg 的編譯選項
         cmd.args(["-c:v", "mpeg4"]);
@@ -663,6 +670,24 @@ mod tests {
             verify_audio_with_ffmpeg(&ff, &f).await.unwrap(),
             Audio::Absent
         );
+    }
+
+    /// 真實案例：影片帶著一條全靜音的音軌（mean_volume -77 dB）。
+    /// 音軌解得開只是安靜——這要回報成 Silent 交給呼叫端，影片模式照收。
+    #[tokio::test]
+    async fn video_with_silent_audio_track_is_silent_not_error() {
+        let Some(ff) = test_ffmpeg() else {
+            return;
+        };
+        let f = synth_video_with(
+            &ff,
+            "silent-track.mp4",
+            Some("anullsrc=r=44100:cl=stereo:d=2"),
+        );
+        assert!(matches!(
+            verify_audio_with_ffmpeg(&ff, &f).await.unwrap(),
+            Audio::Silent(_)
+        ));
     }
 
     #[tokio::test]
